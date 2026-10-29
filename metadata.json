@@ -1,0 +1,6 @@
+{
+  "name": "BSCH Clinics — العيادات الخارجية لمستشفى الأطفال التخصصي بالبحيرة",
+  "description": "منصة حجز المواعيد والاستعلام للعيادات الخارجية بمستشفى الأطفال التخصصي بالبحيرة — احجز موعدك بالاسم ورقم الهاتف فقط وتابع حالة حجزك وتعليمات الحضور.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  --primary-teal: #087F78;
+  --dark-teal: #124E4A;
+  --secondary-turquoise: #79C7C1;
+  --page-bg: #F6F9FB;
+  --surface: #FFFFFF;
+  --main-text: #163C3A;
+  --secondary-text: #8493A6;
+  --border-color: #E2E8EE;
+}
+
+body {
+  background-color: var(--page-bg);
+  color: var(--main-text);
+  min-height: 100vh;
+  direction: rtl;
+}
+
+/* Custom scrollbar for clean hospital interface */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@media print {
+  header, footer, nav, .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}
