@@ -94,6 +94,7 @@ export default function ClinicsPresentationEditor({
           accent_color: selectedClinic.accent_color,
           icon_name: selectedClinic.icon_name,
           description: selectedClinic.description,
+          instructions: selectedClinic.instructions,
         }),
       });
 
@@ -288,6 +289,23 @@ export default function ClinicsPresentationEditor({
                 placeholder="وصف الخدمات التشخيصية والعلاجية المقدمة بالعيادة"
                 className="w-full text-xs bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl p-3 text-[#163C3A] focus:outline-none focus:border-[#087F78]"
               />
+            </div>
+
+            {/* Clinic Instructions & Required Documents */}
+            <div className="md:col-span-3">
+              <label className="block text-xs font-semibold text-[#5A6E85] mb-1.5">
+                تعليمات العيادة والأوراق المطلوبة (Instructions & Required Documents)
+              </label>
+              <textarea
+                rows={3}
+                value={selectedClinic.instructions || ''}
+                onChange={(e) => handleUpdateField('instructions', e.target.value)}
+                placeholder="تعليمات الصيام، الفحوصات والتحاليل أو الأشعات السابقة المطلوبة من ولي الأمر عند الحضور..."
+                className="w-full text-xs bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl p-3 text-[#163C3A] focus:outline-none focus:border-[#087F78]"
+              />
+              <p className="text-[11px] text-[#8493A6] mt-1">
+                تظهر هذه التعليمات بشكل ديناميكي وجذاب للمرضى فور اختيار العيادة في صفحة الحجز.
+              </p>
             </div>
 
             {/* Icon Picker */}

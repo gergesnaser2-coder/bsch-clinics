@@ -496,6 +496,7 @@ class CmsService {
     if (updates.accent_color !== undefined) clinic.accent_color = updates.accent_color;
     if (updates.icon_name !== undefined) clinic.icon_name = updates.icon_name;
     if (updates.description !== undefined) clinic.description = updates.description;
+    if (updates.instructions !== undefined) clinic.instructions = updates.instructions;
 
     if (isSupabaseConfigured()) {
       try {
@@ -509,6 +510,7 @@ class CmsService {
             accent_color: clinic.accent_color,
             icon_name: clinic.icon_name,
             description: clinic.description,
+            instructions: clinic.instructions,
             updated_at: new Date().toISOString(),
           })
           .eq('id', clinicId);

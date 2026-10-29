@@ -184,6 +184,7 @@ export interface ClinicPresentation {
   accent_color?: string;
   icon_name?: string;
   code?: string;
+  instructions?: string;
   is_hospital_confirmed: boolean;
   is_active: boolean;
 }

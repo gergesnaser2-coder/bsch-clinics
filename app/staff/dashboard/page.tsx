@@ -1315,6 +1315,22 @@ export default function StaffDashboardPage() {
               </div>
 
               <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  تعليمات العيادة والأوراق المطلوبة
+                </label>
+                <textarea
+                  rows={3}
+                  value={editingClinic.instructions || ''}
+                  onChange={(e) => setEditingClinic({ ...editingClinic, instructions: e.target.value })}
+                  placeholder="اكتب التعليمات والتحاليل أو الفحوصات المطلوبة من ولي الأمر عند الحضور..."
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78] placeholder:text-slate-400 resize-y"
+                />
+                <p className="text-3xs text-[#8493A6] mt-0.5">
+                  تظهر هذه الإرشادات للمرضى ديناميكياً في صفحة الحجز فور اختيار العيادة.
+                </p>
+              </div>
+
+              <div>
                 <label className="flex items-center gap-2 cursor-pointer pt-2">
                   <input
                     type="checkbox"
