@@ -1,6 +1,5 @@
-import { revalidatePath } from 'next/cache';
-import { createAdminClient, isSupabaseConfigured } from '@/lib/supabase/admin';
-import type { StaffUser } from '@/types';
+import { createAdminClient, isSupabaseConfigured, isMockStoreAllowed } from '../lib/supabase/admin.ts';
+import type { StaffUser } from '../types/index.ts';
 import type {
   WebsiteSettings,
   HomepageSection,
@@ -8,7 +7,18 @@ import type {
   ClinicPresentation,
   CmsFullPayload,
   MediaAsset,
-} from '@/types/cms';
+} from '../types/cms.ts';
+
+async function safeRevalidatePath(pathStr: string) {
+  try {
+    const nextCache = await import('next/cache');
+    if (typeof nextCache.revalidatePath === 'function') {
+      nextCache.revalidatePath(pathStr);
+    }
+  } catch {
+    // Revalidation outside active Next.js server context is safely ignored
+  }
+}
 
 export const DEFAULT_WEBSITE_SETTINGS: WebsiteSettings = {
   id: 'default',
@@ -346,22 +356,28 @@ class CmsService {
           .upsert(updated as any, { onConflict: 'id' });
 
         if (error) {
-          console.error('Supabase updateSettings error:', error);
-          // Return genuine error if database rejected
+          console.error('Supabase updateSettings failed with code:', error.code);
+          return {
+            success: false,
+            error: 'فشل في حفظ إعدادات وهوية الموقع في قاعدة البيانات المركزية. يرجى مراجعة الصلاحيات والمحاولة لاحقاً.',
+          };
         }
-      } catch (err) {
-        console.warn('Supabase updateSettings exception:', err);
+      } catch (err: any) {
+        console.error('Supabase updateSettings exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات المركزية لتحديث الإعدادات. يرجى التحقق من الشبكة.',
+        };
       }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة حفظ الإعدادات غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
     }
 
     this.settings = updated;
-
-    try {
-      revalidatePath('/');
-    } catch {
-      // Revalidation outside request context ignored
-    }
-
+    await safeRevalidatePath('/');
     return { success: true, settings: this.settings };
   }
 
@@ -389,22 +405,33 @@ class CmsService {
     if (isSupabaseConfigured()) {
       try {
         const supabase: any = createAdminClient();
-        await supabase
+        const { error } = await supabase
           .from('homepage_sections')
           .upsert(updated as any, { onConflict: 'id' });
-      } catch (err) {
-        console.warn('Supabase updateSection exception:', err);
+
+        if (error) {
+          console.error('Supabase updateSection failed with code:', error.code);
+          return {
+            success: false,
+            error: `فشل في حفظ قسم (${updated.title || sectionId}) في قاعدة البيانات المركزية.`,
+          };
+        }
+      } catch (err: any) {
+        console.error('Supabase updateSection exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لتحديث القسم.',
+        };
       }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة تعديل الأقسام غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
     }
 
     this.sections[idx] = updated;
-
-    try {
-      revalidatePath('/');
-    } catch {
-      // Revalidation
-    }
-
+    await safeRevalidatePath('/');
     return { success: true, section: updated };
   }
 
@@ -430,20 +457,34 @@ class CmsService {
       try {
         const supabase: any = createAdminClient();
         for (const sec of this.sections) {
-          await supabase
+          const { error } = await supabase
             .from('homepage_sections')
             .update({ display_order: sec.display_order, updated_at: new Date().toISOString() })
             .eq('id', sec.id);
+
+          if (error) {
+            console.error('Supabase reorderSections failed on section:', sec.id, 'code:', error.code);
+            return {
+              success: false,
+              error: 'فشل في تحديث ترتيب بعض الأقسام في قاعدة البيانات المركزية.',
+            };
+          }
         }
-      } catch (err) {
-        console.warn('Supabase reorderSections error:', err);
+      } catch (err: any) {
+        console.error('Supabase reorderSections exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لإعادة ترتيب الأقسام.',
+        };
       }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة ترتيب الأقسام غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
     }
 
-    try {
-      revalidatePath('/');
-    } catch {}
-
+    await safeRevalidatePath('/');
     return { success: true, sections: this.sections };
   }
 
@@ -455,23 +496,35 @@ class CmsService {
       return { success: false, error: 'صلاحية مدير النظام مطلوبة لتعديل قوائم التنقل.' };
     }
 
-    this.navigation = items;
-
     if (isSupabaseConfigured()) {
       try {
         const supabase: any = createAdminClient();
         for (const item of items) {
-          await supabase.from('navigation_items').upsert(item as any, { onConflict: 'id' });
+          const { error } = await supabase.from('navigation_items').upsert(item as any, { onConflict: 'id' });
+          if (error) {
+            console.error('Supabase updateNavigation failed on item:', item.id, 'code:', error.code);
+            return {
+              success: false,
+              error: 'فشل في حفظ بعض عناصر القوائم في قاعدة البيانات المركزية.',
+            };
+          }
         }
-      } catch (err) {
-        console.warn('Supabase updateNavigation error:', err);
+      } catch (err: any) {
+        console.error('Supabase updateNavigation exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لتحديث القوائم.',
+        };
       }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة تعديل القوائم غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
     }
 
-    try {
-      revalidatePath('/');
-    } catch {}
-
+    this.navigation = items;
+    await safeRevalidatePath('/');
     return { success: true, navigation: this.navigation };
   }
 
@@ -489,7 +542,45 @@ class CmsService {
       return { success: false, error: 'العيادة المطلوبة غير موجودة' };
     }
 
-    // Safety constraint: Never touch operational fields
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase: any = createAdminClient();
+        const { error } = await supabase
+          .from('clinics')
+          .update({
+            display_order: updates.display_order !== undefined ? updates.display_order : clinic.display_order,
+            is_featured_on_homepage: updates.is_featured_on_homepage !== undefined ? updates.is_featured_on_homepage : clinic.is_featured_on_homepage,
+            english_title: updates.english_title !== undefined ? updates.english_title : clinic.english_title,
+            accent_color: updates.accent_color !== undefined ? updates.accent_color : clinic.accent_color,
+            icon_name: updates.icon_name !== undefined ? updates.icon_name : clinic.icon_name,
+            description: updates.description !== undefined ? updates.description : clinic.description,
+            instructions: updates.instructions !== undefined ? updates.instructions : clinic.instructions,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', clinicId);
+
+        if (error) {
+          console.error('Supabase updateClinicPresentation failed with code:', error.code);
+          return {
+            success: false,
+            error: `فشل في تحديث مظهر عيادة (${clinic.name}) في قاعدة البيانات المركزية.`,
+          };
+        }
+      } catch (err: any) {
+        console.error('Supabase updateClinicPresentation exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لتحديث مظهر العيادة.',
+        };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة تعديل مظهر العيادات غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
+    }
+
+    // Safety constraint: apply updates to cache only after DB confirms (or in permitted mock mode)
     if (updates.display_order !== undefined) clinic.display_order = updates.display_order;
     if (updates.is_featured_on_homepage !== undefined) clinic.is_featured_on_homepage = updates.is_featured_on_homepage;
     if (updates.english_title !== undefined) clinic.english_title = updates.english_title;
@@ -498,31 +589,7 @@ class CmsService {
     if (updates.description !== undefined) clinic.description = updates.description;
     if (updates.instructions !== undefined) clinic.instructions = updates.instructions;
 
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase: any = createAdminClient();
-        await supabase
-          .from('clinics')
-          .update({
-            display_order: clinic.display_order,
-            is_featured_on_homepage: clinic.is_featured_on_homepage,
-            english_title: clinic.english_title,
-            accent_color: clinic.accent_color,
-            icon_name: clinic.icon_name,
-            description: clinic.description,
-            instructions: clinic.instructions,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', clinicId);
-      } catch (err) {
-        console.warn('Supabase updateClinicPresentation error:', err);
-      }
-    }
-
-    try {
-      revalidatePath('/');
-    } catch {}
-
+    await safeRevalidatePath('/');
     return { success: true, clinic };
   }
 

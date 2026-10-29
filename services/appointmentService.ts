@@ -1,6 +1,6 @@
 import type { Clinic, Appointment, AppointmentSlot, AppointmentStatus, CreateAppointmentInput, AuditLogItem, StaffUser } from '../types/index.ts';
 import { normalizeAndValidateEgyptianPhone, validatePatientName, generateReferenceNumber, canTransitionStatus, formatLocalDate } from '../lib/rules.ts';
-import { createAdminClient, isSupabaseConfigured } from '../lib/supabase/admin.ts';
+import { createAdminClient, isSupabaseConfigured, isMockStoreAllowed } from '../lib/supabase/admin.ts';
 import type { Database } from '../types/database.types.ts';
 
 // Pre-defined pediatric outpatient clinics from BSCH
@@ -319,6 +319,45 @@ class AppointmentServiceStore {
       return { success: false, error: 'العيادة غير موجودة' };
     }
 
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await supabase
+          .from('clinics')
+          .update({
+            name: updates.name !== undefined ? updates.name : clinic.name,
+            location: updates.location !== undefined ? updates.location : clinic.location,
+            working_hours: updates.workingHours !== undefined ? updates.workingHours : clinic.workingHours,
+            max_daily_slots: updates.maxDailySlots !== undefined ? updates.maxDailySlots : clinic.maxDailySlots,
+            is_active: updates.isActive !== undefined ? updates.isActive : clinic.isActive,
+            is_hospital_confirmed: updates.isHospitalConfirmed !== undefined ? updates.isHospitalConfirmed : (clinic.isHospitalConfirmed ?? false),
+            instructions: updates.instructions !== undefined ? updates.instructions : clinic.instructions,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', clinicId);
+
+        if (error) {
+          console.error('Supabase update clinic failed with code:', error.code);
+          return {
+            success: false,
+            error: 'فشل في حفظ تعديلات العيادة في قاعدة البيانات المركزية. يرجى المحاولة لاحقاً.',
+          };
+        }
+      } catch (err: any) {
+        console.error('Supabase update clinic exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لتحديث العيادة. يرجى التحقق من الشبكة.',
+        };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة إدارة العيادات غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
+    }
+
+    // Apply updates locally only after DB confirmation (or in permitted mock mode)
     if (updates.name !== undefined) clinic.name = updates.name;
     if (updates.location !== undefined) clinic.location = updates.location;
     if (updates.workingHours !== undefined) clinic.workingHours = updates.workingHours;
@@ -333,27 +372,6 @@ class AppointmentServiceStore {
       'تعديل إعدادات العيادة',
       `تم تحديث إعدادات ${clinic.name}: الحالة ${clinic.isActive ? 'مفعلة' : 'متوقفة'}، السعة ${clinic.maxDailySlots}، الاعتماد: ${clinic.isHospitalConfirmed ? 'معتمد' : 'تجريبي'}`
     );
-
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = createAdminClient();
-        await supabase
-          .from('clinics')
-          .update({
-            name: clinic.name,
-            location: clinic.location,
-            working_hours: clinic.workingHours,
-            max_daily_slots: clinic.maxDailySlots,
-            is_active: clinic.isActive,
-            is_hospital_confirmed: clinic.isHospitalConfirmed ?? false,
-            instructions: clinic.instructions,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', clinicId);
-      } catch (err) {
-        console.warn('Supabase update clinic error:', err);
-      }
-    }
 
     return { success: true, clinic };
   }
@@ -458,8 +476,16 @@ class AppointmentServiceStore {
         });
 
         if (error) {
-          console.error('Supabase atomic booking RPC error:', error);
-        } else if (data && typeof data === 'object') {
+          console.error('Supabase atomic booking RPC error code:', error.code);
+          return {
+            success: false,
+            error: error.message?.includes('duplicate') || error.message?.includes('مسبق')
+              ? 'يوجد حجز مسبق بالفعل لنفس الهاتف في هذه العيادة في نفس اليوم'
+              : 'فشل في تسجيل الحجز في قاعدة البيانات المركزية، يرجى المحاولة لاحقاً.',
+          };
+        }
+
+        if (data && typeof data === 'object') {
           const res = data as { success: boolean; error?: string; appointment?: any };
           if (!res.success) {
             return { success: false, error: res.error || 'فشل تسجيل الحجز في قاعدة البيانات' };
@@ -467,23 +493,27 @@ class AppointmentServiceStore {
           if (res.appointment) {
             const dbApt = res.appointment;
             const mappedApt: Appointment = {
-              id: dbApt.reference_number || `apt-${Date.now()}`,
+              id: dbApt.id || dbApt.reference_number || `apt-${Date.now()}`,
               referenceNumber: dbApt.reference_number,
               clinicId: dbApt.clinic_id,
               clinicName: dbApt.clinic_name,
               patientName: dbApt.patient_name,
               phoneNumber: dbApt.phone_number,
+              patientAge: dbApt.patient_age || undefined,
+              patientAddress: dbApt.patient_address || undefined,
               appointmentDate: dbApt.appointment_date,
               appointmentTime: dbApt.appointment_time,
               status: dbApt.status,
               queueNumber: dbApt.queue_number,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
+              createdAt: dbApt.created_at || new Date().toISOString(),
+              updatedAt: dbApt.updated_at || new Date().toISOString(),
               statusHistory: [
                 {
                   status: dbApt.status,
                   timestamp: new Date().toISOString(),
-                  note: 'تم تسجيل طلب الحجز بنجاح عبر النظام',
+                  note: input.isWalkIn
+                    ? 'تسجيل حضوري مباشر من مكتب الاستقبال بالمستشفى'
+                    : 'تم استلام وتأكيد طلب الحجز بنجاح في قاعدة البيانات المركزية',
                 },
               ],
             };
@@ -491,9 +521,62 @@ class AppointmentServiceStore {
             return { success: true, appointment: mappedApt };
           }
         }
-      } catch (err) {
-        console.warn('Supabase booking exception, falling back to local transaction store:', err);
+
+        return {
+          success: false,
+          error: 'استجابة غير متوقعة من قاعدة البيانات المركزية، يرجى التحقق من حالة الحجز.',
+        };
+      } catch (err: any) {
+        console.error('Supabase booking exception:', err?.message || 'Network exception');
+
+        // Requirement 8: Reconciliation check before failing
+        // In case of a network timeout where write may have succeeded, check if ref exists
+        try {
+          const supabase = createAdminClient();
+          const { data: existingApt } = await supabase
+            .from('appointments')
+            .select('*')
+            .eq('reference_number', ref)
+            .maybeSingle();
+
+          if (existingApt) {
+            const mappedApt: Appointment = {
+              id: (existingApt as any).id,
+              referenceNumber: (existingApt as any).reference_number,
+              clinicId: (existingApt as any).clinic_id,
+              clinicName: (existingApt as any).clinic_name,
+              patientName: (existingApt as any).patient_name,
+              phoneNumber: (existingApt as any).phone_number,
+              patientAge: (existingApt as any).patient_age || undefined,
+              patientAddress: (existingApt as any).patient_address || undefined,
+              appointmentDate: (existingApt as any).appointment_date,
+              appointmentTime: (existingApt as any).appointment_time,
+              status: (existingApt as any).status,
+              queueNumber: (existingApt as any).queue_number,
+              createdAt: (existingApt as any).created_at,
+              updatedAt: (existingApt as any).updated_at,
+              statusHistory: [],
+            };
+            this.appointments.unshift(mappedApt);
+            return { success: true, appointment: mappedApt };
+          }
+        } catch {
+          // Ignore secondary reconciliation error
+        }
+
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات المركزية لتسجيل الحجز. لم يتم تأكيد الحجز، يرجى إعادة المحاولة.',
+        };
       }
+    }
+
+    // Fallback: strictly checked by isMockStoreAllowed()
+    if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة الحجز الإلكتروني غير متصلة بقاعدة البيانات المركزية في بيئة الإنتاج.',
+      };
     }
 
     // Local memory transaction check fallback
@@ -661,6 +744,53 @@ class AppointmentServiceStore {
     }
 
     const now = new Date().toISOString();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error: aptError } = await supabase
+          .from('appointments')
+          .update({
+            status: targetStatus,
+            last_called_at: targetStatus === 'CHECKED_IN' ? now : apt.lastCalledAt || null,
+            called_count: targetStatus === 'CHECKED_IN' ? (apt.calledCount || 0) + 1 : (apt.calledCount || 0),
+            updated_at: now,
+          })
+          .eq('reference_number', apt.referenceNumber);
+
+        if (aptError) {
+          console.error('Supabase status update error code:', aptError.code);
+          return {
+            success: false,
+            error: 'فشل في تحديث حالة الحجز في قاعدة البيانات المركزية. يرجى إعادة المحاولة.',
+          };
+        }
+
+        const { error: histError } = await supabase.from('appointment_status_history').insert({
+          appointment_id: apt.id,
+          status: targetStatus,
+          note: note || undefined,
+          updated_by: staffName,
+        });
+
+        if (histError) {
+          console.warn('Supabase status history insert warning code:', histError.code);
+        }
+      } catch (err: any) {
+        console.error('Supabase status update exception:', err?.message || 'Network error');
+        return {
+          success: false,
+          error: 'تعذر الاتصال بقاعدة البيانات لتحديث حالة الحجز.',
+        };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return {
+        success: false,
+        error: 'خدمة تعديل الحالات غير متصلة بقاعدة البيانات في بيئة الإنتاج.',
+      };
+    }
+
+    // Apply status change in local memory store only after database confirms (or in permitted mock mode)
     apt.status = targetStatus;
     apt.updatedAt = now;
 
@@ -684,30 +814,6 @@ class AppointmentServiceStore {
       apt.referenceNumber
     );
 
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = createAdminClient();
-        await supabase
-          .from('appointments')
-          .update({
-            status: targetStatus,
-            last_called_at: apt.lastCalledAt || null,
-            called_count: apt.calledCount || 0,
-            updated_at: now,
-          })
-          .eq('reference_number', apt.referenceNumber);
-
-        await supabase.from('appointment_status_history').insert({
-          appointment_id: apt.id,
-          status: targetStatus,
-          note: note || undefined,
-          updated_by: staffName,
-        });
-      } catch (err) {
-        console.warn('Supabase status update error:', err);
-      }
-    }
-
     return { success: true, appointment: apt };
   }
 
@@ -721,15 +827,49 @@ class AppointmentServiceStore {
     }
 
     const now = new Date().toISOString();
+    const newCalledCount = (apt.calledCount || 0) + 1;
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await supabase
+          .from('appointments')
+          .update({
+            status: 'CHECKED_IN',
+            last_called_at: now,
+            called_count: newCalledCount,
+            updated_at: now,
+          })
+          .eq('reference_number', apt.referenceNumber);
+
+        if (error) {
+          console.error('Supabase recallPatient failed code:', error.code);
+          return { success: false, error: 'فشل تسجيل نداء المريض في قاعدة البيانات المركزية.' };
+        }
+
+        await supabase.from('appointment_status_history').insert({
+          appointment_id: apt.id,
+          status: 'CHECKED_IN',
+          note: newCalledCount > 1 ? `إعادة نداء المريض للمرة #${newCalledCount}` : 'نداء المريض وتسجيل الحضور بالعيادة',
+          updated_by: staffUser.name,
+        });
+      } catch (err: any) {
+        console.error('Supabase recallPatient exception:', err?.message || 'Network error');
+        return { success: false, error: 'تعذر الاتصال بقاعدة البيانات لتسجيل النداء.' };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return { success: false, error: 'خدمة نداء المرضى غير متصلة بقاعدة البيانات في بيئة الإنتاج.' };
+    }
+
     apt.status = 'CHECKED_IN';
     apt.lastCalledAt = now;
-    apt.calledCount = (apt.calledCount || 0) + 1;
+    apt.calledCount = newCalledCount;
     apt.updatedAt = now;
 
     apt.statusHistory.push({
       status: 'CHECKED_IN',
       timestamp: now,
-      note: apt.calledCount > 1 ? `إعادة نداء المريض للمرة #${apt.calledCount}` : 'نداء المريض وتسجيل الحضور بالعيادة',
+      note: newCalledCount > 1 ? `إعادة نداء المريض للمرة #${newCalledCount}` : 'نداء المريض وتسجيل الحضور بالعيادة',
       updatedBy: staffUser.name,
     });
 
@@ -737,33 +877,9 @@ class AppointmentServiceStore {
       staffUser.name,
       staffUser.role,
       'إعادة نداء المريض',
-      `إعادة نداء ${apt.patientName} (${apt.clinicName}) للمرة #${apt.calledCount}`,
+      `إعادة نداء مريض (${apt.clinicName}) للمرة #${apt.calledCount}`,
       apt.referenceNumber
     );
-
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = createAdminClient();
-        await supabase
-          .from('appointments')
-          .update({
-            status: 'CHECKED_IN',
-            last_called_at: now,
-            called_count: apt.calledCount,
-            updated_at: now,
-          })
-          .eq('reference_number', apt.referenceNumber);
-
-        await supabase.from('appointment_status_history').insert({
-          appointment_id: apt.id,
-          status: 'CHECKED_IN',
-          note: apt.calledCount > 1 ? `إعادة نداء المريض للمرة #${apt.calledCount}` : 'نداء المريض وتسجيل الحضور بالعيادة',
-          updated_by: staffUser.name,
-        });
-      } catch (err) {
-        console.warn('Supabase recallPatient error:', err);
-      }
-    }
 
     return { success: true, appointment: apt };
   }
@@ -795,15 +911,47 @@ class AppointmentServiceStore {
       (a) => a.clinicId === targetClinicId && a.appointmentDate === apt.appointmentDate && a.status !== 'CANCELLED'
     ).length;
     const newQueue = targetDayCount + 1;
-
     const now = new Date().toISOString();
+    const transferNote = `تم التحويل من [${oldClinicName}] إلى [${targetClinic.name}] برقم دور جديد (#${newQueue}). السبب: ${reason || 'تحويل طبي داخلي'}`;
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await supabase
+          .from('appointments')
+          .update({
+            clinic_id: targetClinic.id,
+            clinic_name: targetClinic.name,
+            queue_number: newQueue,
+            status: 'CONFIRMED',
+            updated_at: now,
+          })
+          .eq('reference_number', apt.referenceNumber);
+
+        if (error) {
+          console.error('Supabase transferClinic failed code:', error.code);
+          return { success: false, error: 'فشل تحويل الحجز في قاعدة البيانات المركزية.' };
+        }
+
+        await supabase.from('appointment_status_history').insert({
+          appointment_id: apt.id,
+          status: 'CONFIRMED',
+          note: transferNote,
+          updated_by: staffUser.name,
+        });
+      } catch (err: any) {
+        console.error('Supabase transferClinic exception:', err?.message || 'Network error');
+        return { success: false, error: 'تعذر الاتصال بقاعدة البيانات لتحويل الحجز.' };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return { success: false, error: 'خدمة تحويل العيادات غير متصلة بقاعدة البيانات في بيئة الإنتاج.' };
+    }
+
     apt.clinicId = targetClinic.id;
     apt.clinicName = targetClinic.name;
     apt.queueNumber = newQueue;
     apt.status = 'CONFIRMED';
     apt.updatedAt = now;
-
-    const transferNote = `تم التحويل من [${oldClinicName}] إلى [${targetClinic.name}] برقم دور جديد (#${newQueue}). السبب: ${reason || 'تحويل طبي داخلي'}`;
 
     apt.statusHistory.push({
       status: 'CONFIRMED',
@@ -820,31 +968,6 @@ class AppointmentServiceStore {
       apt.referenceNumber
     );
 
-    if (isSupabaseConfigured()) {
-      try {
-        const supabase = createAdminClient();
-        await supabase
-          .from('appointments')
-          .update({
-            clinic_id: targetClinic.id,
-            clinic_name: targetClinic.name,
-            queue_number: newQueue,
-            status: 'CONFIRMED',
-            updated_at: now,
-          })
-          .eq('reference_number', apt.referenceNumber);
-
-        await supabase.from('appointment_status_history').insert({
-          appointment_id: apt.id,
-          status: 'CONFIRMED',
-          note: transferNote,
-          updated_by: staffUser.name,
-        });
-      } catch (err) {
-        console.warn('Supabase transferClinic error:', err);
-      }
-    }
-
     return { success: true, appointment: apt };
   }
 
@@ -858,21 +981,19 @@ class AppointmentServiceStore {
     }
 
     const now = new Date().toISOString();
-    apt.status = 'CANCELLED';
-    apt.updatedAt = now;
-    apt.statusHistory.push({
-      status: 'CANCELLED',
-      timestamp: now,
-      note: reason ? `تم الإلغاء: ${reason}` : 'تم إلغاء الحجز بواسطة المريض',
-    });
 
     if (isSupabaseConfigured()) {
       try {
         const supabase = createAdminClient();
-        await supabase
+        const { error } = await supabase
           .from('appointments')
           .update({ status: 'CANCELLED', updated_at: now })
           .eq('reference_number', apt.referenceNumber);
+
+        if (error) {
+          console.error('Supabase cancel failed code:', error.code);
+          return { success: false, error: 'فشل إلغاء الحجز في قاعدة البيانات المركزية.' };
+        }
 
         await supabase.from('appointment_status_history').insert({
           appointment_id: apt.id,
@@ -880,10 +1001,21 @@ class AppointmentServiceStore {
           note: reason ? `تم الإلغاء: ${reason}` : 'تم إلغاء الحجز بواسطة المريض',
           updated_by: 'المريض',
         });
-      } catch (err) {
-        console.warn('Supabase cancel error:', err);
+      } catch (err: any) {
+        console.error('Supabase cancel exception:', err?.message || 'Network error');
+        return { success: false, error: 'تعذر الاتصال بقاعدة البيانات لإلغاء الحجز.' };
       }
+    } else if (!isMockStoreAllowed()) {
+      return { success: false, error: 'خدمة إلغاء الحجز غير متصلة بقاعدة البيانات في بيئة الإنتاج.' };
     }
+
+    apt.status = 'CANCELLED';
+    apt.updatedAt = now;
+    apt.statusHistory.push({
+      status: 'CANCELLED',
+      timestamp: now,
+      note: reason ? `تم الإلغاء: ${reason}` : 'تم إلغاء الحجز بواسطة المريض',
+    });
 
     return { success: true };
   }

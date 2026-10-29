@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test lib/rules.test.ts lib/security.test.ts",
+    "test": "node --test lib/rules.test.ts lib/security.test.ts lib/persistence.test.ts",
     "clean": "node -e \"try { require('fs').rmSync('.next', { recursive: true, force: true }); } catch {}\""
   },
   "dependencies": {
