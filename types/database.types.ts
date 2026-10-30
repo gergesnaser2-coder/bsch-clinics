@@ -451,6 +451,38 @@ export interface Database {
         };
         Relationships: [];
       };
+      otp_verifications: {
+        Row: {
+          phone: string;
+          code_hash: string;
+          attempts: number;
+          expires_at: string;
+          last_requested_at: string;
+          hourly_request_count: number;
+          window_start: string;
+          created_at: string;
+        };
+        Insert: {
+          phone: string;
+          code_hash: string;
+          attempts?: number;
+          expires_at: string;
+          last_requested_at?: string;
+          hourly_request_count?: number;
+          window_start?: string;
+          created_at?: string;
+        };
+        Update: {
+          phone?: string;
+          code_hash?: string;
+          attempts?: number;
+          expires_at?: string;
+          last_requested_at?: string;
+          hourly_request_count?: number;
+          window_start?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {

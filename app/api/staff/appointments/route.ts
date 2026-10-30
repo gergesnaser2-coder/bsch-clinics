@@ -6,7 +6,7 @@ export async function GET(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const staffUser = AuthService.verifySession(token);
+    const staffUser = await AuthService.verifySession(token);
 
     if (!staffUser) {
       return NextResponse.json(

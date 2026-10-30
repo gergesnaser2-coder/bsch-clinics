@@ -6,7 +6,7 @@ export async function POST(req: NextRequest) {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
     if (token) {
-      AuthService.revokeSession(token);
+      await AuthService.revokeSession(token);
     }
     return NextResponse.json({ success: true });
   } catch (error) {

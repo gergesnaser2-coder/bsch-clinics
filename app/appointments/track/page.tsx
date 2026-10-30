@@ -1,12 +1,11 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
   Search,
   Clock,
-  MapPin,
   Calendar,
   User,
   Printer,
@@ -15,6 +14,9 @@ import {
   ArrowRight,
   RefreshCw,
   Info,
+  Phone,
+  ShieldCheck,
+  CheckCircle2,
 } from 'lucide-react';
 import { SiteHeader } from '@/components/SiteHeader';
 import { SiteFooter } from '@/components/SiteFooter';
@@ -23,11 +25,16 @@ import { getStatusDisplay, formatArabicDate } from '@/lib/rules';
 
 function TrackContent() {
   const searchParams = useSearchParams();
-  const initialRef = searchParams.get('ref') || searchParams.get('q') || '';
   const initialPhone = searchParams.get('phone') || '';
 
-  const [refQuery, setRefQuery] = useState(initialRef);
   const [phoneQuery, setPhoneQuery] = useState(initialPhone);
+
+  // OTP flow state: strictly phone-number based as requested by hospital client
+  const [step, setStep] = useState<'PHONE' | 'OTP' | 'RESULTS'>('PHONE');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpNotice, setOtpNotice] = useState<string | null>(null);
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
@@ -38,45 +45,46 @@ function TrackContent() {
   const [cancelReason, setCancelReason] = useState('');
   const [isCancelling, setIsCancelling] = useState(false);
 
-  useEffect(() => {
-    if (!initialRef || !initialPhone) return;
-    let active = true;
-
-    async function fetchInitial() {
-      setLoading(true);
-      setHasSearched(true);
-      try {
-        const res = await fetch(
-          `/api/appointments/track?ref=${encodeURIComponent(initialRef.trim())}&phone=${encodeURIComponent(initialPhone.trim())}`
-        );
-        const data = await res.json();
-        if (active) {
-          if (data.success && data.appointments) {
-            setAppointments(data.appointments);
-          } else {
-            setErrorMessage(data.error || 'تعذر العثور على الحجز');
-          }
-        }
-      } catch (err) {
-        console.error(err);
-        if (active) setErrorMessage('حدث خطأ أثناء الاتصال بالخادم');
-      } finally {
-        if (active) setLoading(false);
-      }
+  // Request OTP for phone-only tracking via POST
+  async function handleRequestOtp() {
+    const cleanPhone = phoneQuery.trim();
+    if (!cleanPhone) {
+      setErrorMessage('يرجى إدخال رقم الهاتف المسجل بالحجز');
+      return;
     }
 
-    fetchInitial();
-    return () => {
-      active = false;
-    };
-  }, [initialRef, initialPhone]);
+    setIsSendingOtp(true);
+    setErrorMessage(null);
 
-  async function handleSearch(r?: string, p?: string) {
-    const curRef = (r !== undefined ? r : refQuery).trim();
-    const curPhone = (p !== undefined ? p : phoneQuery).trim();
+    try {
+      const res = await fetch('/api/appointments/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'request', phone: cleanPhone }),
+      });
+      const data = await res.json();
 
-    if (!curRef || !curPhone) {
-      setErrorMessage('لأسباب أمنية وحماية خصوصية بيانات المرضى، يلزم إدخال كل من الرقم المرجعي ورقم الهاتف المسجل معاً.');
+      if (!res.ok || !data.success) {
+        setErrorMessage(data.error || 'تعذر إرسال رمز التحقق');
+      } else {
+        setStep('OTP');
+        setOtpNotice(data.demoNotice || 'تم إرسال رمز التحقق إلى رقم هاتفك المحمول');
+      }
+    } catch (err) {
+      console.error('Request OTP error');
+      setErrorMessage('حدث خطأ أثناء الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+    } finally {
+      setIsSendingOtp(false);
+    }
+  }
+
+  // Verify OTP and fetch appointments via POST (credentials never in URL)
+  async function handleVerifyOtpAndFetch() {
+    const cleanPhone = phoneQuery.trim();
+    const cleanOtp = otpCode.trim();
+
+    if (!cleanOtp) {
+      setErrorMessage('يرجى إدخال رمز التحقق المكون من 4 أرقام');
       return;
     }
 
@@ -85,19 +93,26 @@ function TrackContent() {
     setHasSearched(true);
 
     try {
-      const res = await fetch(
-        `/api/appointments/track?ref=${encodeURIComponent(curRef)}&phone=${encodeURIComponent(curPhone)}`
-      );
+      const res = await fetch('/api/appointments/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'verify',
+          phone: cleanPhone,
+          otp: cleanOtp,
+        }),
+      });
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setErrorMessage(data.error || 'تعذر البحث عن الحجز');
+        setErrorMessage(data.error || 'رمز التحقق غير صحيح أو تعذر الاستعلام');
         setAppointments([]);
       } else {
         setAppointments(data.appointments || []);
+        setStep('RESULTS');
       }
     } catch (err) {
-      console.error('Error tracking appointment:', err);
+      console.error('Error tracking appointment');
       setErrorMessage('حدث خطأ أثناء الاتصال بالخادم، يرجى المحاولة مرة أخرى');
       setAppointments([]);
     } finally {
@@ -117,15 +132,21 @@ function TrackContent() {
       });
       const data = await res.json();
       if (data.success) {
-        // Refresh search results
-        await handleSearch(refQuery, phoneQuery);
+        // Refresh by re-verifying or marking cancelled in local state
+        setAppointments((prev) =>
+          prev.map((a) =>
+            (a.id === cancellingAptId || a.referenceNumber === cancellingAptId)
+              ? { ...a, status: 'CANCELLED' }
+              : a
+          )
+        );
         setCancellingAptId(null);
         setCancelReason('');
       } else {
         alert(data.error || 'تعذر إلغاء الموعد');
       }
     } catch (err) {
-      console.error('Cancel error:', err);
+      console.error('Cancel error');
       alert('حدث خطأ أثناء إلغاء الحجز');
     } finally {
       setIsCancelling(false);
@@ -134,7 +155,6 @@ function TrackContent() {
 
   return (
     <div className="w-full max-w-[900px] mx-auto px-4 sm:px-6 py-8">
-      
       {/* Navigation Breadcrumb */}
       <div className="mb-6 flex items-center justify-between text-xs text-[#8493A6]">
         <Link href="/" className="inline-flex items-center gap-1 hover:text-[#087F78] transition-colors">
@@ -142,95 +162,192 @@ function TrackContent() {
           <span>العودة للرئيسية</span>
         </Link>
         <span className="text-xs text-[#8493A6]">
-          الاستعلام الآمن بالرقم المرجعي ورقم الهاتف المسجل معاً
+          متابعة الحجز برقم الهاتف المسجل
         </span>
       </div>
 
       {/* Header of Tracking */}
       <div className="text-center mb-6 space-y-2">
-        <div className="w-13 h-13 rounded-2xl bg-[#0284C7] text-white flex items-center justify-center mx-auto shadow-sm">
+        <div className="w-13 h-13 rounded-2xl bg-[#0284C7] text-white flex items-center justify-center mx-auto shadow-xs">
           <Search className="w-7 h-7 stroke-[2]" />
         </div>
         <h1 className="text-2xl sm:text-3xl font-extrabold text-[#124E4A]">
-          متابعة الحجز
+          متابعة الحجز برقم الهاتف
         </h1>
-        <p className="text-xs sm:text-sm text-[#8493A6]">
-          تحقق أمني مزدوج: أدخل الرقم المرجعي ورقم الهاتف المسجل لحماية خصوصيتك
+        <p className="text-xs sm:text-sm text-[#8493A6] max-w-md mx-auto">
+          أدخل رقم الهاتف المسجل عند الحجز لتأكيد الهوية واستعراض تذكرة الموعد ورقم الدور
         </p>
       </div>
 
-      {/* Search Input Box */}
-      <div className="bg-white rounded-[22px] border border-[#E2E8EE] p-4 sm:p-5 shadow-xs max-w-xl mx-auto mb-8">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSearch();
-          }}
-          className="space-y-4"
-        >
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {/* Main Input Box */}
+      <div className="bg-white rounded-[22px] border border-[#E2E8EE] p-5 sm:p-6 shadow-xs max-w-xl mx-auto mb-8 text-right">
+        {step !== 'RESULTS' ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (step === 'PHONE') {
+                handleRequestOtp();
+              } else if (step === 'OTP') {
+                handleVerifyOtpAndFetch();
+              }
+            }}
+            className="space-y-4"
+          >
+            {/* Phone Number Input */}
             <div>
-              <label className="block text-xs font-bold text-[#163C3A] mb-1">
-                الرقم المرجعي للحجز <span className="text-red-500">*</span>
+              <label className="block text-xs font-bold text-[#163C3A] mb-1.5 flex items-center justify-between">
+                <span>رقم هاتف ولي الأمر المسجل بالحجز <span className="text-red-500">*</span></span>
+                {step === 'OTP' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStep('PHONE');
+                      setOtpCode('');
+                      setErrorMessage(null);
+                    }}
+                    className="text-2xs text-[#087F78] hover:underline"
+                  >
+                    تغيير الرقم
+                  </button>
+                )}
               </label>
-              <input
-                type="text"
-                value={refQuery}
-                onChange={(e) => setRefQuery(e.target.value)}
-                placeholder="مثال: BSCH-1042"
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2E8EE] focus:border-[#0284C7] focus:ring-1 focus:ring-[#0284C7]/20 bg-[#F6F9FB] text-xs sm:text-sm text-[#163C3A] text-right font-mono font-bold placeholder:text-[#8493A6] transition-all"
-              />
+              <div className="relative">
+                <input
+                  type="tel"
+                  dir="ltr"
+                  disabled={step === 'OTP'}
+                  value={phoneQuery}
+                  onChange={(e) => setPhoneQuery(e.target.value)}
+                  placeholder="01xxxxxxxxx"
+                  className={`w-full px-3.5 py-3 rounded-xl border border-[#E2E8EE] focus:border-[#0284C7] focus:ring-1 focus:ring-[#0284C7]/20 text-xs sm:text-sm text-[#163C3A] text-right font-mono font-bold placeholder:text-[#8493A6] transition-all ${
+                    step === 'OTP' ? 'bg-slate-100/70 text-slate-500' : 'bg-[#F6F9FB]'
+                  }`}
+                />
+                <Phone className="absolute left-3.5 top-3.5 w-4 h-4 text-slate-400 pointer-events-none" />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs font-bold text-[#163C3A] mb-1">
-                رقم الهاتف المسجل <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="tel"
-                dir="ltr"
-                value={phoneQuery}
-                onChange={(e) => setPhoneQuery(e.target.value)}
-                placeholder="01xxxxxxxxx"
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2E8EE] focus:border-[#0284C7] focus:ring-1 focus:ring-[#0284C7]/20 bg-[#F6F9FB] text-xs sm:text-sm text-[#163C3A] text-right font-mono font-bold placeholder:text-[#8493A6] transition-all"
-              />
+
+            {/* STEP 2: OTP Verification Card */}
+            {step === 'OTP' && (
+              <div className="p-4 rounded-xl bg-teal-50/70 border border-teal-200/80 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <ShieldCheck className="w-5 h-5 text-[#087F78] shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="text-xs font-bold text-[#124E4A]">تأكيد ملكية رقم الهاتف</h4>
+                    <p className="text-2xs text-[#5A6B82] leading-relaxed mt-0.5">
+                      لحماية خصوصية بيانات طفلك، تم إرسال رمز تحقق مكوّن من 4 أرقام لهاتفك المحمول.
+                    </p>
+                  </div>
+                </div>
+
+                {otpNotice && (
+                  <div className="p-2.5 rounded-lg bg-white border border-teal-200 text-teal-800 text-xs font-semibold flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-[#087F78]" />
+                    <span>{otpNotice}</span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                    أدخل رمز التحقق (4 أرقام) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    dir="ltr"
+                    autoFocus
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    placeholder="••••"
+                    className="w-full px-4 py-2.5 rounded-xl border border-teal-300 focus:border-[#087F78] bg-white text-center font-mono text-lg font-bold tracking-widest text-[#124E4A]"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-2xs text-[#8493A6] pt-1">
+                  <span>صلاحية الرمز 5 دقائق</span>
+                  <button
+                    type="button"
+                    onClick={handleRequestOtp}
+                    disabled={isSendingOtp}
+                    className="text-[#087F78] font-bold hover:underline disabled:opacity-50"
+                  >
+                    إعادة إرسال الرمز
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {errorMessage && (
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {/* Submit Button */}
+            <div className="pt-2">
+              {step === 'PHONE' ? (
+                <button
+                  type="submit"
+                  disabled={isSendingOtp || loading}
+                  className="w-full py-3 rounded-xl bg-[#087F78] hover:bg-[#124E4A] text-white text-xs sm:text-sm font-bold shadow-xs hover:shadow-md transition-all cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  {isSendingOtp || loading ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <span>متابعة الحجز برقم الهاتف</span>
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 rounded-xl bg-[#087F78] hover:bg-[#124E4A] text-white text-xs sm:text-sm font-bold shadow-xs hover:shadow-md transition-all cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  {loading ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <span>تأكيد الرمز وعرض الحجز</span>
+                  )}
+                </button>
+              )}
             </div>
-          </div>
-
-          <div className="pt-1 flex items-center justify-between">
-            <span className="text-3xs text-[#8493A6]">
-              يُشترط تطابق الرقمين لحماية سرية المريض
-            </span>
-
+          </form>
+        ) : (
+          /* Step === 'RESULTS': Compact bar to search again */
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-[#8493A6]">نتائج الاستعلام للرقم:</span>
+              <strong className="font-mono text-[#124E4A] font-bold">{phoneQuery}</strong>
+            </div>
             <button
-              type="submit"
-              disabled={loading}
-              className="px-6 py-2.5 rounded-xl bg-[#0284C7] hover:bg-[#0369A1] text-white text-xs sm:text-sm font-bold shadow-xs hover:shadow-md transition-all shrink-0 cursor-pointer disabled:opacity-60"
+              onClick={() => {
+                setStep('PHONE');
+                setAppointments([]);
+                setHasSearched(false);
+                setOtpCode('');
+                setErrorMessage(null);
+              }}
+              className="text-[#087F78] font-bold hover:underline"
             >
-              {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'استعلام عن الحجز'}
+              استعلام برقم هاتف آخر
             </button>
           </div>
-        </form>
+        )}
       </div>
 
-      {/* Error Message */}
-      {errorMessage && (
-        <div className="max-w-xl mx-auto mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm flex items-center gap-3 text-right">
-          <AlertCircle className="w-5 h-5 shrink-0 text-red-500" />
-          <span>{errorMessage}</span>
-        </div>
-      )}
-
       {/* Results View */}
-      {hasSearched && (
+      {hasSearched && step === 'RESULTS' && (
         <div className="space-y-6">
           {appointments.length === 0 ? (
             <div className="bg-white rounded-[22px] border border-[#E2E8EE] p-8 text-center max-w-lg mx-auto shadow-xs">
               <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
                 <Search className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-[#124E4A] mb-1">لم يتم العثور على حجوزات</h3>
+              <h3 className="text-lg font-bold text-[#124E4A] mb-1">لا توجد حجوزات مسجلة</h3>
               <p className="text-xs text-[#8493A6] mb-5">
-                تأكد من إدخال كل من الرقم المرجعي (BSCH-XXXX) ورقم الهاتف المسجل معاً بشكل صحيح للحصول على تفاصيل الموعد.
+                لا توجد حجوزات قائمة مسجلة برقم هذا الهاتف. يمكنك حجز موعد جديد في عيادات المستشفى التخصصية.
               </p>
               <Link
                 href="/appointments/new"
@@ -244,7 +361,7 @@ function TrackContent() {
               const status = getStatusDisplay(apt.status);
               return (
                 <div
-                  key={apt.id}
+                  key={apt.id || apt.referenceNumber}
                   className="bg-white rounded-[22px] border border-[#E2E8EE] p-6 sm:p-7 shadow-xs text-right relative overflow-hidden"
                 >
                   {/* Top Bar: Reference & Status Badge */}
@@ -254,7 +371,7 @@ function TrackContent() {
                         <Calendar className="w-5 h-5" />
                       </div>
                       <div>
-                        <span className="text-2xs text-[#8493A6] block">الرقم المرجعي</span>
+                        <span className="text-2xs text-[#8493A6] block">الرقم المرجعي للحجز</span>
                         <span className="text-lg sm:text-xl font-black text-[#124E4A] font-mono tracking-wide">
                           {apt.referenceNumber}
                         </span>
@@ -283,7 +400,7 @@ function TrackContent() {
                   </div>
 
                   {/* Body: Details Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 py-5 border-b border-slate-100 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 py-5 border-b border-slate-100 text-xs">
                     <div>
                       <span className="text-[#8493A6] block mb-1">اسم المريض</span>
                       <span className="font-bold text-[#163C3A] text-sm flex items-center gap-1">
@@ -293,51 +410,27 @@ function TrackContent() {
                     </div>
 
                     <div>
-                      <span className="text-[#8493A6] block mb-1">العيادة والمكان</span>
+                      <span className="text-[#8493A6] block mb-1">العيادة التخصصية</span>
                       <span className="font-bold text-[#087F78] text-sm block">{apt.clinicName}</span>
                     </div>
 
                     <div>
-                      <span className="text-[#8493A6] block mb-1">تاريخ الموعد</span>
+                      <span className="text-[#8493A6] block mb-1">تاريخ الحضور المقرر</span>
                       <span className="font-bold text-[#163C3A] text-sm block">
                         {formatArabicDate(apt.appointmentDate)}
                       </span>
                     </div>
-
-                    <div>
-                      <span className="text-[#8493A6] block mb-1">وقت الموعد</span>
-                      <span className="font-bold text-[#163C3A] text-sm block font-mono">
-                        الساعة {apt.appointmentTime}
-                      </span>
-                    </div>
                   </div>
 
-                  {/* Instructions & Status History */}
+                  {/* Instructions */}
                   <div className="py-4 space-y-3">
                     <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100 text-xs text-[#8493A6] leading-relaxed flex items-start gap-2">
                       <Info className="w-4 h-4 text-[#087F78] shrink-0 mt-0.5" />
                       <div>
                         <span className="font-semibold text-[#124E4A] ml-1">تعليمات الحضور:</span>
-                        يرجى الحضور قبل الموعد بـ 20 دقيقة، والتوجه لمكتب الاستقبال بالدور الأرضي لاستلام تذكرة النداء بعد إبراز الرقم المرجعي أو رقم الهاتف.
+                        يرجى الحضور في يوم الموعد والتوجه لمكتب الاستقبال بالدور الأرضي لاستلام تذكرة النداء الآلي بعد إبراز رقم الهاتف المسجل.
                       </div>
                     </div>
-
-                    {apt.statusHistory && apt.statusHistory.length > 0 && (
-                      <div className="pt-2">
-                        <span className="text-2xs font-semibold text-[#8493A6] block mb-2">سجل متابعة الطلب:</span>
-                        <div className="space-y-1.5">
-                          {apt.statusHistory.map((item, histIdx) => (
-                            <div key={histIdx} className="text-2xs text-[#8493A6] flex items-center gap-2">
-                              <span className="w-1.5 h-1.5 rounded-full bg-[#087F78]" />
-                              <span>{item.note || getStatusDisplay(item.status).label}</span>
-                              <span className="font-mono text-slate-400">
-                                ({new Date(item.timestamp).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
                   </div>
 
                   {/* Actions Bar */}
@@ -347,16 +440,16 @@ function TrackContent() {
                       className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-slate-200 text-xs font-semibold text-[#163C3A] hover:bg-slate-50 transition-colors"
                     >
                       <Printer className="w-3.5 h-3.5 text-[#087F78]" />
-                      <span>طباعة التذكرة</span>
+                      <span>طباعة تذكرة الحجز</span>
                     </button>
 
                     {apt.status !== 'CANCELLED' && apt.status !== 'COMPLETED' && (
                       <button
-                        onClick={() => setCancellingAptId(apt.id)}
+                        onClick={() => setCancellingAptId(apt.id || apt.referenceNumber)}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors"
                       >
                         <XCircle className="w-3.5 h-3.5" />
-                        <span>إلغاء الحجز</span>
+                        <span>إلغاء الموعد</span>
                       </button>
                     )}
                   </div>
@@ -367,13 +460,13 @@ function TrackContent() {
         </div>
       )}
 
-      {/* Link to Book a new appointment (Matching screenshot 4) */}
+      {/* Link to Book a new appointment */}
       <div className="text-center mt-10">
         <Link
           href="/appointments/new"
           className="inline-flex items-center gap-1.5 text-sm font-bold text-[#087F78] hover:text-[#124E4A] hover:underline"
         >
-          <span>ليس لديك حجز؟ احجز موعدًا الآن</span>
+          <span>ليس لديك حجز؟ احجز موعدًا جديداً الآن</span>
           <ArrowRight className="w-4 h-4" />
         </Link>
       </div>
@@ -426,7 +519,6 @@ function TrackContent() {
           </div>
         </div>
       )}
-
     </div>
   );
 }

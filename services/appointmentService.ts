@@ -125,7 +125,7 @@ const INITIAL_APPOINTMENTS: Appointment[] = [
     patientName: 'أحمد محمود إبراهيم النجار',
     phoneNumber: '01012345678',
     patientAge: '4 سنوات',
-    patientAddress: 'دمنهور - شبرا',
+    patientAddress: 'أبو حمص - دمسنا',
     appointmentDate: getTodayDateString(),
     appointmentTime: '09:00',
     status: 'CONFIRMED',
@@ -692,6 +692,47 @@ class AppointmentServiceStore {
         a.referenceNumber.toUpperCase() === cleanRef &&
         a.phoneNumber === cleanPhone
     );
+  }
+
+  public async trackAppointmentsByVerifiedPhone(
+    phoneNumber: string
+  ): Promise<Appointment[]> {
+    const phoneCheck = normalizeAndValidateEgyptianPhone(phoneNumber);
+    if (!phoneCheck.isValid) return [];
+    const cleanPhone = phoneCheck.normalized;
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { data, error } = await (supabase as any)
+          .from('appointments')
+          .select('id, reference_number, clinic_id, clinic_name, patient_name, appointment_date, appointment_time, status, queue_number')
+          .eq('phone_number', cleanPhone)
+          .order('appointment_date', { ascending: false });
+
+        if (!error && data && Array.isArray(data)) {
+          return data.map((dbApt: any) => ({
+            id: dbApt.id || dbApt.reference_number,
+            referenceNumber: dbApt.reference_number,
+            clinicId: dbApt.clinic_id,
+            clinicName: dbApt.clinic_name,
+            patientName: dbApt.patient_name,
+            phoneNumber: cleanPhone,
+            appointmentDate: dbApt.appointment_date,
+            appointmentTime: dbApt.appointment_time,
+            status: dbApt.status,
+            queueNumber: dbApt.queue_number,
+            createdAt: '',
+            updatedAt: '',
+            statusHistory: [],
+          }));
+        }
+      } catch (err) {
+        console.warn('Supabase trackAppointmentsByVerifiedPhone error:', err);
+      }
+    }
+
+    return this.appointments.filter((a) => a.phoneNumber === cleanPhone);
   }
 
   public getAppointmentById(id: string): Appointment | undefined {

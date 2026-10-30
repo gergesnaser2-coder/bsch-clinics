@@ -27,7 +27,7 @@ test('Persistence Test 1: Booking failure in Supabase NEVER returns a false succ
       patientName: 'كريم أحمد محمد يوسف',
       phoneNumber: '01012345678',
       patientAge: '5 سنوات',
-      patientAddress: 'دمنهور - البحيرة',
+      patientAddress: 'أبو حمص - دمسنا - البحيرة',
       appointmentDate: '2026-11-20',
     });
 

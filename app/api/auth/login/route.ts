@@ -12,15 +12,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const user = AuthService.validateCredentials(username, password);
-    if (!user) {
+    const session = await AuthService.validateCredentials(username, password);
+    if (!session) {
       return NextResponse.json(
         { error: 'بيانات الدخول غير صحيحة، يرجى التأكد من اسم المستخدم وكلمة المرور' },
         { status: 401 }
       );
     }
-
-    const session = AuthService.createSession(user);
 
     return NextResponse.json({
       success: true,

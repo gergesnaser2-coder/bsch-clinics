@@ -48,12 +48,12 @@ export function NoticeBar({ config }: NoticeBarProps) {
     return null;
   }
 
-  const title = config?.title || 'تنبيه مواعيد العمل:';
+  const title = config?.title || 'تنظيم العيادات الخارجية:';
   const message =
     config?.message ||
-    'العيادات الخارجية تستقبل المرضى من 8:30 ص حتى 2:00 م (السبت - الخميس).';
+    'الحجز الإلكتروني متاح بنظام تذاكر الدور وأسبقية الحضور اليومي بالعيادات التخصصية.';
   const hotlineLabel =
-    config?.hotline_label || 'طوارئ الأطفال تعمل 24/7 عبر الخط الساخن 137';
+    config?.hotline_label || 'مستشفى الأطفال التخصصي — دمسنا';
 
   return (
     <aside

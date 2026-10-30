@@ -40,7 +40,7 @@ export function HeroBanner({ section }: HeroBannerProps) {
   const cardTitle = content.feature_card_title || 'مميزات الحجز الإلكتروني';
   const cardBadge = content.feature_card_badge || 'خدمة معتمدة';
   const cardFooter =
-    content.feature_card_footer || 'مجمع المستشفيات التخصصية بدمنهور — قطاع الرعاية العلاجية';
+    content.feature_card_footer || 'مستشفى الأطفال التخصصي — أبو حمص – دمسنا – محافظة البحيرة';
   const bullets = content.feature_card_bullets || [
     {
       icon: 'Clock',

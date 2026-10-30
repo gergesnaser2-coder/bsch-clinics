@@ -1238,7 +1238,7 @@ export default function StaffDashboardPage() {
                     type="text"
                     value={walkInAddress}
                     onChange={(e) => setWalkInAddress(e.target.value)}
-                    placeholder="مثال: دمنهور"
+                    placeholder="مثال: أبو حمص - دمسنا"
                     className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
                   />
                 </div>

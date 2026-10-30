@@ -7,7 +7,7 @@ export async function POST(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const staffUser = AuthService.verifySession(token);
+    const staffUser = await AuthService.verifySession(token);
 
     if (!staffUser || (staffUser.role !== 'RECEPTIONIST' && staffUser.role !== 'ADMIN')) {
       return NextResponse.json(

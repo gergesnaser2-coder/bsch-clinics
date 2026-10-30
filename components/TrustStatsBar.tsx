@@ -1,5 +1,5 @@
 import React from 'react';
-import { Stethoscope, CalendarCheck2, Award, PhoneCall, Sparkles } from 'lucide-react';
+import { Stethoscope, CalendarCheck2, Award, ShieldCheck, Sparkles } from 'lucide-react';
 import type { HomepageSection, TrustStatsSectionContent } from '@/types/cms';
 
 interface TrustStatsBarProps {
@@ -36,17 +36,17 @@ export function TrustStatsBar({ section }: TrustStatsBarProps) {
       accentBg: 'bg-sky-50 text-sky-700 border-sky-100',
     },
     {
-      icon: PhoneCall,
-      value: '٢٤/٧ متاح',
-      label: 'طوارئ مركزية على مدار الساعة',
-      description: 'الخط الساخن المركزي الموحد 137',
-      accentBg: 'bg-amber-50/70 text-amber-800 border-amber-200/60',
+      icon: ShieldCheck,
+      value: 'رعاية فائقة',
+      label: 'أحدث التجهيزات الطبية',
+      description: 'عيادات تخصصية متكاملة لأطفال البحيرة',
+      accentBg: 'bg-emerald-50/70 text-emerald-800 border-emerald-200/60',
     },
   ];
 
   const items = content.items && content.items.length > 0
     ? content.items.map((it, idx) => ({
-        icon: idx === 0 ? Stethoscope : idx === 1 ? CalendarCheck2 : idx === 2 ? Award : PhoneCall,
+        icon: idx === 0 ? Stethoscope : idx === 1 ? CalendarCheck2 : idx === 2 ? Award : ShieldCheck,
         value: it.value,
         label: it.label,
         description: it.desc,

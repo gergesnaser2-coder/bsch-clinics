@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const staffUser = AuthService.verifySession(token);
+    const staffUser = await AuthService.verifySession(token);
 
     if (!staffUser || staffUser.role !== 'ADMIN') {
       return NextResponse.json({ error: 'غير مصرح بعرض مكتبة الوسائط.' }, { status: 403 });
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const staffUser = AuthService.verifySession(token);
+    const staffUser = await AuthService.verifySession(token);
 
     if (!staffUser || staffUser.role !== 'ADMIN') {
       return NextResponse.json(

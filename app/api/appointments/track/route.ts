@@ -1,60 +1,153 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appointmentStore } from '@/services/appointmentService';
+import { normalizeAndValidateEgyptianPhone } from '@/lib/rules';
+import { generateOtp, verifyOtp } from '@/lib/otp';
 
-export async function GET(req: NextRequest) {
+/**
+ * POST /api/appointments/track
+ * Secure endpoint for Phone-Based Tracking:
+ *
+ * Action 1: Request OTP (body: { action: 'request', phone: string } or body: { phone: string })
+ * - Validates Egyptian phone format.
+ * - Rate limits generation requests.
+ * - Returns a generic uniform message preventing phone-number enumeration.
+ * - Never returns plaintext OTP in production.
+ *
+ * Action 2: Verify OTP & Retrieve Appointments (body: { action: 'verify', phone: string, otp: string })
+ * - Uses POST body so phone number and OTP code NEVER appear in URLs, access logs, or referrers.
+ * - Enforces server-side expiration, brute-force lockout, and single-use replay protection.
+ * - Exposes only sanitized, permitted appointment details for the authenticated phone number.
+ */
+export async function POST(req: NextRequest) {
   try {
-    const searchParams = req.nextUrl.searchParams;
-    let ref = searchParams.get('ref') || searchParams.get('referenceNumber') || '';
-    let phone = searchParams.get('phone') || searchParams.get('phoneNumber') || '';
-    const q = searchParams.get('q') || '';
+    const body = await req.json().catch(() => ({}));
+    const action = body.action || (body.otp ? 'verify' : 'request');
+    const phone = (body.phone || body.phoneNumber || '').toString().trim();
 
-    // If q is provided and either ref or phone is missing, try parsing two tokens
-    if (q && (!ref || !phone)) {
-      const parts = q.trim().split(/\s+/);
-      if (parts.length >= 2) {
-        for (const p of parts) {
-          if (/^BSCH-[0-9]{4,6}$/i.test(p) || /^[0-9]{4}$/.test(p)) {
-            ref = p;
-          } else if (/^01[0125][0-9]{8}$/.test(p) || /^\+?201[0125][0-9]{8}$/.test(p)) {
-            phone = p;
-          }
-        }
-      } else {
-        // Only one token passed in q
-        if (/^BSCH-[0-9]{4,6}$/i.test(q) || /^[0-9]{4}$/.test(q)) {
-          ref = q;
-        } else if (/^01[0125][0-9]{8}$/.test(q) || /^\+?201[0125][0-9]{8}$/.test(q)) {
-          phone = q;
-        }
-      }
-    }
-
-    // Two-factor verification requirement
-    if (!ref || !phone) {
+    // 1. Phone validation
+    const phoneCheck = normalizeAndValidateEgyptianPhone(phone);
+    if (!phoneCheck.isValid) {
       return NextResponse.json(
-        {
-          error:
-            'لأسباب أمنية وحماية خصوصية بيانات المرضى، يلزم إدخال كل من الرقم المرجعي (BSCH-XXXX) ورقم الهاتف المسجل معاً للاستعلام عن الحجز.',
-        },
+        { error: 'رقم الهاتف غير صحيح، يجب أن يتكون من 11 رقماً ويبدأ بـ 01 (010 / 011 / 012 / 015)' },
         { status: 400 }
       );
     }
 
-    const appointments = await appointmentStore.trackAppointment(ref, phone);
+    const normalizedPhone = phoneCheck.normalized;
 
-    if (appointments.length === 0) {
-      return NextResponse.json(
-        {
+    // ACTION: REQUEST OTP
+    if (action === 'request') {
+      const otpGen = await generateOtp(normalizedPhone);
+
+      if (!otpGen.success) {
+        return NextResponse.json(
+          { error: otpGen.error || 'تعذر إرسال رمز التحقق في الوقت الحالي' },
+          { status: 429 }
+        );
+      }
+
+      // Generic response: Does not indicate whether the phone number has appointments in DB,
+      // which completely eliminates phone enumeration vulnerability.
+      return NextResponse.json({
+        success: true,
+        message: 'تم إرسال رمز التحقق إلى رقم هاتفك المحمول بنجاح.',
+        expiresAt: otpGen.expiresAt,
+        demoNotice: otpGen.demoNotice, // Undefined in production
+      });
+    }
+
+    // ACTION: VERIFY OTP & FETCH APPOINTMENTS
+    if (action === 'verify') {
+      const otp = (body.otp || body.code || '').toString().trim();
+
+      if (!otp) {
+        return NextResponse.json(
+          { error: 'يرجى إدخال رمز التحقق المكون من 4 أرقام.' },
+          { status: 400 }
+        );
+      }
+
+      // Strict server-side verification
+      const verifyRes = await verifyOtp(normalizedPhone, otp);
+      if (!verifyRes.valid) {
+        return NextResponse.json(
+          {
+            error: verifyRes.error || 'رمز التحقق غير صحيح أو انتهت صلاحيته.',
+            attemptsRemaining: verifyRes.attemptsRemaining,
+          },
+          { status: 400 }
+        );
+      }
+
+      // OTP verified successfully; retrieve appointments for this verified phone number
+      const appointments = await appointmentStore.trackAppointmentsByVerifiedPhone(normalizedPhone);
+
+      if (appointments.length === 0) {
+        return NextResponse.json({
           success: true,
           count: 0,
           appointments: [],
-          message: 'لم يتم العثور على حجز يطابق هذا الرقم المرجعي ورقم الهاتف.',
-        },
-        { status: 200 }
-      );
+          message: 'لا توجد حجوزات مسجلة برقم هذا الهاتف حالياً.',
+        });
+      }
+
+      // Sanitize fields: Expose only permitted appointment data (No national ID, internal staff notes, or full address)
+      const sanitizedAppointments = appointments.map((a) => ({
+        referenceNumber: a.referenceNumber,
+        clinicId: a.clinicId,
+        clinicName: a.clinicName,
+        patientName: a.patientName,
+        appointmentDate: a.appointmentDate,
+        appointmentTime: a.appointmentTime,
+        status: a.status,
+        queueNumber: a.queueNumber,
+      }));
+
+      return NextResponse.json({
+        success: true,
+        count: sanitizedAppointments.length,
+        appointments: sanitizedAppointments,
+      });
     }
 
-    // Return minimized safe fields only
+    return NextResponse.json({ error: 'إجراء غير معروف.' }, { status: 400 });
+  } catch (error) {
+    // Log error safely without exposing user phone or credentials
+    console.error('Error in /api/appointments/track POST handler');
+    return NextResponse.json({ error: 'حدث خطأ أثناء معالجة الطلب، يرجى المحاولة لاحقاً.' }, { status: 500 });
+  }
+}
+
+/**
+ * GET /api/appointments/track
+ *
+ * Security notice: Passing OTP in GET query parameters is strictly rejected to prevent
+ * exposing authentication tokens in browser history, proxy caches, and webserver access logs.
+ */
+export async function GET(req: NextRequest) {
+  const searchParams = req.nextUrl.searchParams;
+  const otp = searchParams.get('otp');
+
+  if (otp) {
+    return NextResponse.json(
+      {
+        error: 'لأسباب أمنية لحماية الخصوصية، يرجى إرسال رمز التحقق عبر طلب POST لتجنب ظهوره في سجلات التصفح.',
+      },
+      { status: 400 }
+    );
+  }
+
+  // Legacy internal two-factor lookup by exact referenceNumber + phone (preserved for internal systems if needed)
+  const ref = searchParams.get('ref') || searchParams.get('referenceNumber') || '';
+  const phone = searchParams.get('phone') || searchParams.get('phoneNumber') || '';
+
+  if (ref && phone) {
+    const phoneCheck = normalizeAndValidateEgyptianPhone(phone);
+    if (!phoneCheck.isValid) {
+      return NextResponse.json({ error: 'رقم الهاتف غير صحيح' }, { status: 400 });
+    }
+
+    const appointments = await appointmentStore.trackAppointment(ref, phoneCheck.normalized);
     const sanitizedAppointments = appointments.map((a) => ({
       referenceNumber: a.referenceNumber,
       clinicId: a.clinicId,
@@ -71,8 +164,12 @@ export async function GET(req: NextRequest) {
       count: sanitizedAppointments.length,
       appointments: sanitizedAppointments,
     });
-  } catch (error) {
-    console.error('Error tracking appointment:', error);
-    return NextResponse.json({ error: 'تعذر الاستعلام عن الحجز' }, { status: 500 });
   }
+
+  return NextResponse.json(
+    {
+      error: 'يرجى استخدام نموذج المتابعة برقم الهاتف المسجل وتأكيد رمز التحقق (OTP) عبر طلب POST.',
+    },
+    { status: 400 }
+  );
 }

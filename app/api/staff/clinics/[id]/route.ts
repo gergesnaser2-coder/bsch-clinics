@@ -10,7 +10,7 @@ export async function PATCH(
     const { id } = await params;
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const staffUser = AuthService.verifySession(token);
+    const staffUser = await AuthService.verifySession(token);
 
     if (!staffUser || staffUser.role !== 'ADMIN') {
       return NextResponse.json(

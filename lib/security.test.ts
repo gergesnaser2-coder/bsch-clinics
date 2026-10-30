@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { appointmentStore } from '../services/appointmentService.ts';
+import { AuthService } from '../services/authService.ts';
 import type { StaffUser, Clinic } from '../types/index.ts';
 
 test('Security 1: Anonymous tracking requires two-factor verification (Reference + Phone)', async () => {
@@ -122,7 +123,7 @@ test('Security 5: book_appointment_atomic data minimization', async () => {
     patientName: 'كريم خالد عبد السلام النمر',
     phoneNumber: '01211112233',
     patientAge: '3 سنوات',
-    patientAddress: 'دمنهور - شارع عبد السلام الشاذلي',
+    patientAddress: 'أبو حمص - دمسنا - البحيرة',
     appointmentDate: '2026-11-20',
     appointmentTime: '09:00',
   });
@@ -359,4 +360,59 @@ test('Security 8: Seed data re-run resilience - Confirmed clinics preserve hospi
     'Provisional clinic can be updated when unconfirmed'
   );
   assert.equal(dentistry.max_daily_slots, 22);
+});
+
+test('Security 9: Staff Authentication - Validates credentials and maps to safe StaffUser without exposing passwords', async () => {
+  AuthService._resetMockSessionsForTesting();
+
+  // Invalid credentials
+  const invalidSession = await AuthService.validateCredentials('admin', 'wrong_pass');
+  assert.equal(invalidSession, null, 'Invalid password must return null');
+
+  // Valid credentials
+  const validSession = await AuthService.validateCredentials('admin', 'admin2026');
+  assert.ok(validSession, 'Valid credentials must yield an AuthSession');
+  assert.ok(validSession.token, 'Session must contain a token');
+  assert.equal(validSession.user.role, 'ADMIN', 'Role must map to ADMIN');
+  assert.equal((validSession.user as any).passwordHash, undefined, 'Password hash must never be in user object');
+});
+
+test('Security 10: Staff Authentication - verifySession authenticates active token and rejects invalid/revoked tokens', async () => {
+  AuthService._resetMockSessionsForTesting();
+  const session = await AuthService.validateCredentials('reception', 'bsch2026');
+  assert.ok(session);
+
+  // Valid token verification
+  const user = await AuthService.verifySession(session.token);
+  assert.ok(user);
+  assert.equal(user.username, 'reception');
+  assert.equal(user.role, 'RECEPTIONIST');
+
+  // Revoke session
+  await AuthService.revokeSession(session.token);
+
+  // Subsequent verification should fail
+  const postRevokeUser = await AuthService.verifySession(session.token);
+  assert.equal(postRevokeUser, null, 'Revoked session must return null');
+
+  // Garbage token
+  const garbageUser = await AuthService.verifySession('invalid_random_token');
+  assert.equal(garbageUser, null, 'Invalid token must return null');
+});
+
+test('Security 11: Staff Authentication - Production mode forbids in-memory staff login when Supabase is unconfigured', async () => {
+  const originalEnv = process.env.NODE_ENV;
+  try {
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+
+    await assert.rejects(
+      async () => {
+        await AuthService.validateCredentials('admin', 'admin2026');
+      },
+      /قاعدة بيانات الإنتاج غير مهيأة|تسجيل الدخول غير متاح/,
+      'Must reject in-memory login in production when Supabase is unconfigured'
+    );
+  } finally {
+    (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
+  }
 });

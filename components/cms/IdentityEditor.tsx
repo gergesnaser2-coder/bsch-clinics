@@ -253,22 +253,18 @@ export default function IdentityEditor({ initialSettings, token, onSaved }: Iden
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           <div>
             <label className="block text-xs font-semibold text-[#5A6E85] mb-1.5">
-              الخط الساخن المركزي للطوارئ (Hotline) *
+              رقم التواصل / الخط الساخن بالمستشفى
             </label>
             <div className="relative">
               <input
                 type="text"
-                required
                 value={settings.emergency_hotline}
                 onChange={(e) => handleChange('emergency_hotline', e.target.value)}
-                placeholder="137"
-                className="w-full text-sm bg-amber-50/50 border border-amber-200 rounded-xl px-4 py-2.5 text-amber-900 font-bold focus:outline-none focus:border-amber-400"
+                placeholder="أدخل وسيلة التواصل المعتمدة"
+                className="w-full text-sm bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl px-4 py-2.5 text-[#163C3A] font-bold focus:outline-none focus:border-[#087F78]"
               />
-              <span className="absolute left-3 top-2.5 text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md font-bold">
-                طوارئ
-              </span>
             </div>
-            <p className="text-[11px] text-[#8493A6] mt-1">الرقم المعتمد لوزارة الصحة وطوارئ الأطفال</p>
+            <p className="text-[11px] text-[#8493A6] mt-1">الرقم المعتمد للتواصل المباشر مع المستشفى</p>
           </div>
 
           <div>
@@ -279,7 +275,7 @@ export default function IdentityEditor({ initialSettings, token, onSaved }: Iden
               type="text"
               value={settings.contact_phone}
               onChange={(e) => handleChange('contact_phone', e.target.value)}
-              placeholder="045-333XXXX"
+              placeholder="أدخل هاتف الاستعلامات الرسمي"
               className="w-full text-sm bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl px-4 py-2.5 text-[#163C3A] focus:outline-none focus:border-[#087F78] focus:bg-white"
             />
           </div>
@@ -292,7 +288,7 @@ export default function IdentityEditor({ initialSettings, token, onSaved }: Iden
               type="email"
               value={settings.contact_email}
               onChange={(e) => handleChange('contact_email', e.target.value)}
-              placeholder="info@bsch.gov.eg"
+              placeholder="أدخل البريد الإلكتروني الرسمي"
               className="w-full text-sm bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl px-4 py-2.5 text-[#163C3A] focus:outline-none focus:border-[#087F78] focus:bg-white"
             />
           </div>
@@ -370,7 +366,7 @@ export default function IdentityEditor({ initialSettings, token, onSaved }: Iden
               type="text"
               value={settings.notice_bar.hotline_label}
               onChange={(e) => handleNoticeBarChange('hotline_label', e.target.value)}
-              placeholder="طوارئ الأطفال تعمل 24/7 عبر الخط الساخن 137"
+              placeholder="مستشفى الأطفال التخصصي — دمسنا"
               className="w-full text-sm bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl px-4 py-2.5 text-[#163C3A] focus:outline-none focus:border-[#087F78] focus:bg-white"
             />
           </div>
@@ -383,7 +379,7 @@ export default function IdentityEditor({ initialSettings, token, onSaved }: Iden
               rows={2}
               value={settings.notice_bar.message}
               onChange={(e) => handleNoticeBarChange('message', e.target.value)}
-              placeholder="العيادات الخارجية تستقبل المرضى من 8:30 ص حتى 2:00 م (السبت - الخميس)."
+              placeholder="الحجز الإلكتروني متاح بنظام تذاكر الدور وأسبقية الحضور اليومي بالعيادات التخصصية."
               className="w-full text-sm bg-[#F8FAFC] border border-[#CBD5E1] rounded-xl p-3 text-[#163C3A] focus:outline-none focus:border-[#087F78] focus:bg-white resize-y"
             />
           </div>

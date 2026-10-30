@@ -81,9 +81,7 @@ const bookingSchema = z
     notes: z.string().optional(),
   })
   .superRefine((data, ctx) => {
-    const isWalkInOnly =
-      data.serviceType === 'WALK_IN_PROCEDURE' ||
-      data.serviceType === 'EMERGENCY';
+    const isWalkInOnly = data.serviceType === 'WALK_IN_PROCEDURE';
 
     if (!isWalkInOnly && (!data.appointmentDate || data.appointmentDate.trim() === '')) {
       ctx.addIssue({
@@ -112,21 +110,15 @@ const SERVICE_TYPE_OPTIONS = [
   },
   {
     value: 'WALK_IN_PROCEDURE',
-    label: 'إجراء طبي / عملية صغرى (حضور مباشر فقط)',
+    label: 'إجراء طبي / فحص مباشر (حضور مباشر لمكتب الاستقبال)',
     isWalkInOnly: true,
     badge: 'حضور مباشر',
-  },
-  {
-    value: 'EMERGENCY',
-    label: 'طوارئ أطفال حرجة (حضور فوري 24/7)',
-    isWalkInOnly: true,
-    badge: 'طوارئ فورية',
   },
 ];
 
 // Helper: check if a service is Walk-in Only
 function isWalkInOnlyService(serviceType: string): boolean {
-  return serviceType === 'WALK_IN_PROCEDURE' || serviceType === 'EMERGENCY';
+  return serviceType === 'WALK_IN_PROCEDURE';
 }
 
 // ============================================================================
@@ -630,7 +622,7 @@ function NewAppointmentForm() {
                         id="patientAddress"
                         type="text"
                         {...register('patientAddress')}
-                        placeholder="مثال: دمنهور - شارع الجمهورية"
+                        placeholder="مثال: أبو حمص - دمسنا"
                         className={`w-full px-4 py-3 rounded-xl border bg-white text-slate-900 text-xs sm:text-sm placeholder:text-slate-400 transition-all shadow-2xs focus:outline-hidden ${
                           errors.patientAddress
                             ? 'border-red-300 focus:border-red-500 focus:ring-2 focus:ring-red-100'
@@ -742,7 +734,7 @@ function NewAppointmentForm() {
                       <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-500">
                         <span className="flex items-center gap-1 text-[#087F78] font-bold">
                           <Clock className="w-3 h-3" />
-                          <span>{activeClinic.workingHours || '8:30 ص - 2:00 م'}</span>
+                          <span>{activeClinic.workingHours || 'أسبقية الحضور وتذاكر اليوم'}</span>
                         </span>
                         <span>•</span>
                         <span>{activeClinic.location || 'مبنى العيادات الخارجية'}</span>
@@ -822,23 +814,11 @@ function NewAppointmentForm() {
                             تنبيه هام: هذه الخدمة مخصصة للحضور المباشر فقط
                           </h4>
                           <p className="mt-1 leading-relaxed text-amber-900/90 font-medium">
-                            هذه الخدمة لا تقبل الحجز الإلكتروني المسبق. يلزم الحضور المباشر للمستشفى،
-                            ويتم تسجيل الحالة في نفس اليوم عبر موظف الاستقبال بناءً على التقييم الطبي.
+                            هذه الخدمة لا تقبل الحجز الإلكتروني المسبق. يلزم الحضور المباشر لمكتب الاستقبال
+                            بالعيادات الخارجية لتنسيق موعد الفحص وفقاً لأولوية الحالات.
                           </p>
                         </div>
                       </div>
-
-                      {selectedServiceType === 'EMERGENCY' && (
-                        <div className="mt-3 pt-3 border-t border-amber-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                          <span className="text-amber-800">
-                            طوارئ الأطفال تعمل 24 ساعة يومياً على مدار الأسبوع لاستقبال الحالات الحرجة فوراً.
-                          </span>
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-200/60 text-amber-900 font-bold w-fit">
-                            <PhoneCall className="w-3.5 h-3.5 text-amber-700" />
-                            <span>الخط الساخن: 137</span>
-                          </span>
-                        </div>
-                      )}
                     </div>
                   )}
 

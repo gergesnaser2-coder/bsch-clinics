@@ -27,11 +27,11 @@ CREATE TABLE IF NOT EXISTS public.website_settings (
   header_logo_url TEXT NOT NULL DEFAULT '/logo-outpatient.png',
   footer_logo_url TEXT NOT NULL DEFAULT '/logo-main.png',
   favicon_url TEXT NOT NULL DEFAULT '/favicon.ico',
-  contact_phone TEXT NOT NULL DEFAULT '045-XXXXXXX',
-  emergency_hotline TEXT NOT NULL DEFAULT '137',
-  contact_email TEXT NOT NULL DEFAULT 'info@bsch.gov.eg',
-  hospital_address TEXT NOT NULL DEFAULT 'دمنهور - محافظة البحيرة - مجمع المستشفيات التخصصية',
-  working_hours TEXT NOT NULL DEFAULT 'السبت - الخميس (8:30 ص إلى 2:00 م)',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  emergency_hotline TEXT NOT NULL DEFAULT '',
+  contact_email TEXT NOT NULL DEFAULT '',
+  hospital_address TEXT NOT NULL DEFAULT 'أبو حمص – دمسنا – محافظة البحيرة',
+  working_hours TEXT NOT NULL DEFAULT '',
   meta_title TEXT NOT NULL DEFAULT 'BSCH Clinics — العيادات الخارجية لمستشفى الأطفال التخصصي بالبحيرة',
   meta_description TEXT NOT NULL DEFAULT 'منصة حجز المواعيد والاستعلام للعيادات الخارجية بمستشفى الأطفال التخصصي بالبحيرة — احجز موعدك بالاسم ورقم الهاتف فقط وتابع حالة حجزك وتعليمات الحضور.',
   og_image_url TEXT NOT NULL DEFAULT '/logo-main.png',
@@ -43,9 +43,9 @@ CREATE TABLE IF NOT EXISTS public.website_settings (
   ]'::jsonb,
   notice_bar JSONB NOT NULL DEFAULT '{
     "is_enabled": true,
-    "title": "تنبيه مواعيد العمل:",
-    "message": "العيادات الخارجية تستقبل المرضى من 8:30 ص حتى 2:00 م (السبت - الخميس).",
-    "hotline_label": "طوارئ الأطفال تعمل 24/7 عبر الخط الساخن 137"
+    "title": "تنظيم العيادات الخارجية:",
+    "message": "الحجز الإلكتروني متاح بنظام تذاكر الدور وأسبقية الحضور اليومي بالعيادات التخصصية.",
+    "hotline_label": "مستشفى الأطفال التخصصي — دمسنا"
   }'::jsonb,
   footer_summary TEXT NOT NULL DEFAULT 'خدمة حكومية متخصصة لتقديم الرعاية الطبية الفائقة لأطفال محافظة البحيرة والمحافظات المجاورة، من خلال نخبة من أطباء واستشاريي الأطفال في شتى التخصصات الدقيقة.',
   footer_copyright TEXT NOT NULL DEFAULT 'مستشفى الأطفال التخصصي بالبحيرة. جميع الحقوق محفوظة.',
@@ -127,11 +127,11 @@ VALUES (
   'مستشفى الأطفال التخصصي بالبحيرة',
   '/logo-outpatient.png',
   '/logo-main.png',
-  '045-XXXXXXX',
-  '137',
-  'info@bsch.gov.eg',
-  'دمنهور - محافظة البحيرة - مجمع المستشفيات التخصصية',
-  'السبت - الخميس (8:30 ص إلى 2:00 م)',
+  '',
+  '',
+  '',
+  'أبو حمص – دمسنا – محافظة البحيرة',
+  '',
   'BSCH Clinics — العيادات الخارجية لمستشفى الأطفال التخصصي بالبحيرة',
   'منصة حجز المواعيد والاستعلام للعيادات الخارجية بمستشفى الأطفال التخصصي بالبحيرة — احجز موعدك بالاسم ورقم الهاتف فقط وتابع حالة حجزك وتعليمات الحضور.',
   'خدمة حكومية متخصصة لتقديم الرعاية الطبية الفائقة لأطفال محافظة البحيرة والمحافظات المجاورة، من خلال نخبة من أطباء واستشاريي الأطفال في شتى التخصصات الدقيقة.',
@@ -177,7 +177,7 @@ VALUES
         {"icon": "Smartphone", "title": "المتطلبات: الاسم ورقم الهاتف فقط", "desc": "بدون الحاجة لإنشاء حساب أو تذكر كلمات مرور معقدة."},
         {"icon": "Ticket", "title": "إيصال فوري برقم الدور", "desc": "تحديد موعد وتوقيت الحضور مع إمكانية طباعة الإيصال وحفظه."}
       ],
-      "feature_card_footer": "مجمع المستشفيات التخصصية بدمنهور — قطاع الرعاية العلاجية"
+      "feature_card_footer": "مستشفى الأطفال التخصصي — أبو حمص – دمسنا – محافظة البحيرة"
     }'::jsonb
   ),
   (
@@ -192,7 +192,7 @@ VALUES
         {"value": "٨ عيادات", "label": "عيادات تخصصية دقيقة", "desc": "قلب، أعصاب، أسنان، جراحة، وغيرها", "icon": "Stethoscope", "accent_color": "#087F78", "bg_color": "bg-emerald-50 text-emerald-700 border-emerald-100"},
         {"value": "١٠٠٪ رقمي", "label": "حجز إلكتروني منظم", "desc": "بدون طوابير شباك وبأرقام دور متتابعة", "icon": "CalendarCheck2", "accent_color": "#0D5F5A", "bg_color": "bg-teal-50 text-teal-700 border-teal-100"},
         {"value": "نخبة طبية", "label": "أطباء واستشاريون", "desc": "كوادر مؤهلة في طب وجراحة الأطفال", "icon": "Award", "accent_color": "#0284C7", "bg_color": "bg-sky-50 text-sky-700 border-sky-100"},
-        {"value": "٢٤/٧ متاح", "label": "طوارئ مركزية على مدار الساعة", "desc": "الخط الساخن المركزي الموحد 137", "icon": "PhoneCall", "accent_color": "#B45309", "bg_color": "bg-amber-50/70 text-amber-800 border-amber-200/60"}
+        {"value": "رعاية فائقة", "label": "أحدث التجهيزات الطبية", "desc": "عيادات تخصصية متكاملة لخدمة أطفال البحيرة", "icon": "ShieldCheck", "accent_color": "#087F78", "bg_color": "bg-emerald-50/70 text-emerald-800 border-emerald-200/60"}
       ]
     }'::jsonb
   ),
@@ -288,9 +288,9 @@ VALUES
           "icon": "PhoneCall",
           "color": "#2563EB",
           "items": [
-            "مقر المستشفى: دمنهور - مجمع المستشفيات التخصصية بالبحيرة",
-            "أيام وساعات العمل: السبت إلى الخميس من 8:30 صباحاً حتى 2:00 ظهراً",
-            "طوارئ الأطفال تعمل على مدار 24 ساعة يومياً على الخط 137"
+            "مقر المستشفى: أبو حمص – دمسنا – محافظة البحيرة",
+            "تنظيم الدخول: بأسبقية الحضور وتذاكر الانتظار اليومية",
+            "الاستعلام وتأكيد الحجز إلكترونياً بالاسم ورقم الهاتف فقط"
           ]
         }
       ]
@@ -326,9 +326,9 @@ VALUES
           "category": "المستندات والفحوصات"
         },
         {
-          "question": "ما هي مواعيد العمل الرسمية للعيادات؟ وكيف يتم التعامل مع الحالات الحرجة؟",
-          "answer": "تعمل العيادات الخارجية التخصصية من السبت إلى الخميس، من الساعة 8:30 صباحاً وحتى 2:00 ظهراً (الجمعة عطلة رسمية). أما بالنسبة لحالات طوارئ الأطفال والحوادث الحرجة، فإن قسم الطوارئ بالمستشفى يعمل على مدار 24 ساعة يومياً طوال أيام الأسبوع عبر الخط الساخن 137.",
-          "category": "المواعيد والطوارئ"
+          "question": "كيف يتم تنظيم الحضور واستقبال الأطفال في العيادات الخارجية؟",
+          "answer": "تعمل العيادات الخارجية التخصصية بنظام الحجز المسبق والتذاكر اليومية، ويتم استقبال المرضى وتنظيم دخولهم بأسبقية الحضور.",
+          "category": "المواعيد والتنظيم"
         }
       ]
     }'::jsonb

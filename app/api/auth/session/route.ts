@@ -5,7 +5,7 @@ export async function GET(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    const user = AuthService.verifySession(token);
+    const user = await AuthService.verifySession(token);
 
     if (!user) {
       return NextResponse.json({ authenticated: false }, { status: 401 });

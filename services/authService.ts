@@ -1,4 +1,5 @@
-import { StaffUser } from '../types';
+import type { StaffUser } from '../types/index.ts';
+import { createAdminClient, isSupabaseConfigured, isMockStoreAllowed } from '../lib/supabase/admin.ts';
 
 export interface AuthSession {
   user: StaffUser;
@@ -6,7 +7,8 @@ export interface AuthSession {
   expiresAt: number;
 }
 
-const STAFF_USERS: (StaffUser & { passwordHash: string })[] = [
+// Offline test fixtures strictly utilized in local development / unit testing when Supabase is unconfigured
+const TEST_STAFF_FIXTURES: (StaffUser & { passwordHash: string })[] = [
   {
     id: 'user-rec-1',
     username: 'reception',
@@ -34,53 +36,180 @@ const STAFF_USERS: (StaffUser & { passwordHash: string })[] = [
   },
 ];
 
-// Active sessions memory map attached to globalThis for Next.js cross-route sharing
+// In-memory sessions map strictly for offline unit tests / development
 const globalForAuth = globalThis as unknown as {
   activeSessions?: Map<string, AuthSession>;
 };
 
-const activeSessions = globalForAuth.activeSessions ?? new Map<string, AuthSession>();
+const memoryActiveSessions = globalForAuth.activeSessions ?? new Map<string, AuthSession>();
 if (process.env.NODE_ENV !== 'production') {
-  globalForAuth.activeSessions = activeSessions;
+  globalForAuth.activeSessions = memoryActiveSessions;
 }
 
 export class AuthService {
-  public static validateCredentials(username: string, password: string): StaffUser | null {
-    if (!username || !password) return null;
-    const cleanUser = username.trim().toLowerCase();
-    const user = STAFF_USERS.find(
-      (u) => u.username.toLowerCase() === cleanUser && u.active
+  /**
+   * Validate staff credentials using Supabase Auth in production or mock fallback in dev tests.
+   */
+  public static async validateCredentials(
+    usernameInput: string,
+    passwordInput: string
+  ): Promise<AuthSession | null> {
+    if (!usernameInput || !passwordInput) return null;
+    const cleanUser = usernameInput.trim();
+    const cleanPass = passwordInput.trim();
+
+    // 1. Supabase Auth Path
+    if (isSupabaseConfigured()) {
+      try {
+        const adminClient = createAdminClient();
+        const email = cleanUser.includes('@') ? cleanUser : `${cleanUser.toLowerCase()}@bsch-clinics.gov.eg`;
+
+        const { data, error } = await adminClient.auth.signInWithPassword({
+          email,
+          password: cleanPass,
+        });
+
+        if (error || !data.user || !data.session) {
+          return null;
+        }
+
+        // Map auth.users record to verified public.staff_profiles
+        const { data: profile, error: profileErr } = await (adminClient as any)
+          .from('staff_profiles')
+          .select('id, username, full_name, role, clinic_id, is_active')
+          .eq('id', data.user.id)
+          .maybeSingle();
+
+        if (profileErr || !profile || !profile.is_active) {
+          return null;
+        }
+
+        const safeUser: StaffUser = {
+          id: profile.id,
+          username: profile.username,
+          name: profile.full_name,
+          role: profile.role,
+          clinicId: profile.clinic_id || undefined,
+          active: profile.is_active,
+        };
+
+        return {
+          user: safeUser,
+          token: data.session.access_token,
+          expiresAt: Date.now() + (data.session.expires_in || 28800) * 1000,
+        };
+      } catch (err) {
+        console.error('Supabase signInWithPassword exception:', err);
+        return null;
+      }
+    }
+
+    // 2. Production safety check: In-memory authentication is strictly forbidden in production
+    if (!isMockStoreAllowed()) {
+      throw new Error('تسجيل الدخول غير متاح: قاعدة بيانات المصادقة غير مهيأة في بيئة الإنتاج.');
+    }
+
+    // 3. Offline Dev / Unit Test Fallback
+    const user = TEST_STAFF_FIXTURES.find(
+      (u) => u.username.toLowerCase() === cleanUser.toLowerCase() && u.active
     );
     if (!user) return null;
-    if (user.passwordHash !== password) return null;
+    if (user.passwordHash !== cleanPass) return null;
 
     const { passwordHash: _, ...safeUser } = user;
-    return safeUser;
-  }
-
-  public static createSession(user: StaffUser): AuthSession {
     const token = `bsch_token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
     const session: AuthSession = {
-      user,
+      user: safeUser,
       token,
       expiresAt: Date.now() + 1000 * 60 * 60 * 8, // 8 hours
     };
-    activeSessions.set(token, session);
+    memoryActiveSessions.set(token, session);
     return session;
   }
 
-  public static verifySession(token: string | null | undefined): StaffUser | null {
+  /**
+   * Verify an authentication token against Supabase Auth and staff_profiles.
+   * Never trusts client-supplied roles.
+   */
+  public static async verifySession(token: string | null | undefined): Promise<StaffUser | null> {
     if (!token) return null;
-    const session = activeSessions.get(token);
+    const cleanToken = token.trim();
+
+    // 1. Supabase Auth Verification
+    if (isSupabaseConfigured()) {
+      try {
+        const adminClient = createAdminClient();
+        const { data, error } = await adminClient.auth.getUser(cleanToken);
+
+        if (error || !data.user) {
+          return null;
+        }
+
+        // Query server-enforced role and clinic assignment from staff_profiles
+        const { data: profile, error: profileErr } = await (adminClient as any)
+          .from('staff_profiles')
+          .select('id, username, full_name, role, clinic_id, is_active')
+          .eq('id', data.user.id)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (profileErr || !profile) {
+          return null;
+        }
+
+        return {
+          id: profile.id,
+          username: profile.username,
+          name: profile.full_name,
+          role: profile.role,
+          clinicId: profile.clinic_id || undefined,
+          active: profile.is_active,
+        };
+      } catch (err) {
+        console.error('Supabase verifySession exception:', err);
+        return null;
+      }
+    }
+
+    // 2. Production Safety: In-memory verification forbidden in production
+    if (!isMockStoreAllowed()) {
+      return null;
+    }
+
+    // 3. Offline Dev / Unit Test Fallback
+    const session = memoryActiveSessions.get(cleanToken);
     if (!session) return null;
     if (session.expiresAt < Date.now()) {
-      activeSessions.delete(token);
+      memoryActiveSessions.delete(cleanToken);
       return null;
     }
     return session.user;
   }
 
-  public static revokeSession(token: string): boolean {
-    return activeSessions.delete(token);
+  /**
+   * Revoke an active session.
+   */
+  public static async revokeSession(token: string): Promise<boolean> {
+    if (!token) return false;
+    const cleanToken = token.trim();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const adminClient = createAdminClient();
+        await adminClient.auth.admin.signOut(cleanToken).catch(() => {});
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    return memoryActiveSessions.delete(cleanToken);
+  }
+
+  /**
+   * Helper for offline test teardowns
+   */
+  public static _resetMockSessionsForTesting(): void {
+    memoryActiveSessions.clear();
   }
 }
