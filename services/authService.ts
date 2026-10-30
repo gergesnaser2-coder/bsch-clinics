@@ -62,7 +62,8 @@ export class AuthService {
     if (isSupabaseConfigured()) {
       try {
         const adminClient = createAdminClient();
-        const email = cleanUser.includes('@') ? cleanUser : `${cleanUser.toLowerCase()}@bsch-clinics.gov.eg`;
+        const staffDomain = process.env.STAFF_AUTH_DOMAIN || 'hospital.internal';
+        const email = cleanUser.includes('@') ? cleanUser : `${cleanUser.toLowerCase()}@${staffDomain}`;
 
         const { data, error } = await adminClient.auth.signInWithPassword({
           email,
@@ -80,8 +81,8 @@ export class AuthService {
           .eq('id', data.user.id)
           .maybeSingle();
 
-        if (profileErr || !profile || !profile.is_active) {
-          return null;
+        if (profileErr || !profile || profile.is_active !== true) {
+          return null; // Fail closed: reject inactive, suspended, or unlinked user
         }
 
         const safeUser: StaffUser = {
@@ -150,11 +151,10 @@ export class AuthService {
           .from('staff_profiles')
           .select('id, username, full_name, role, clinic_id, is_active')
           .eq('id', data.user.id)
-          .eq('is_active', true)
           .maybeSingle();
 
-        if (profileErr || !profile) {
-          return null;
+        if (profileErr || !profile || profile.is_active !== true) {
+          return null; // Fail closed: reject inactive or missing staff profile
         }
 
         return {

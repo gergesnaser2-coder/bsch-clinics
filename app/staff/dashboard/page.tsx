@@ -27,9 +27,13 @@ import {
   Shield,
   Building,
   Globe,
+  Plus,
+  Trash2,
+  CalendarX,
+  CalendarDays,
 } from 'lucide-react';
 import CmsDashboard from '@/components/cms/CmsDashboard';
-import { Appointment, Clinic, AppointmentStatus, AuditLogItem } from '@/types';
+import { Appointment, Clinic, ClinicScheduleException, AppointmentStatus, AuditLogItem } from '@/types';
 import { getStatusDisplay, formatArabicDate, formatLocalDate } from '@/lib/rules';
 
 export default function StaffDashboardPage() {
@@ -82,6 +86,28 @@ export default function StaffDashboardPage() {
   const [adminClinics, setAdminClinics] = useState<Clinic[]>([]);
   const [loadingAdminClinics, setLoadingAdminClinics] = useState(false);
   const [editingClinic, setEditingClinic] = useState<Clinic | null>(null);
+
+  // Create Clinic Modal State
+  const [showCreateClinicModal, setShowCreateClinicModal] = useState(false);
+  const [newClinicName, setNewClinicName] = useState('');
+  const [newClinicDesc, setNewClinicDesc] = useState('');
+  const [newClinicLocation, setNewClinicLocation] = useState('');
+  const [newClinicHours, setNewClinicHours] = useState('08:30-14:00');
+  const [newClinicDays, setNewClinicDays] = useState<number[]>([0, 1, 2, 3, 4, 6]);
+  const [newClinicCapacity, setNewClinicCapacity] = useState(20);
+  const [newClinicInstructions, setNewClinicInstructions] = useState('');
+  const [newClinicDocs, setNewClinicDocs] = useState('أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي\nصورة بطاقة ولي الأمر');
+  const [creatingClinic, setCreatingClinic] = useState(false);
+
+  // Calendar Exceptions Modal State
+  const [managingSchedulesClinic, setManagingSchedulesClinic] = useState<Clinic | null>(null);
+  const [clinicSchedulesList, setClinicSchedulesList] = useState<ClinicScheduleException[]>([]);
+  const [loadingSchedules, setLoadingSchedules] = useState(false);
+  const [newExceptionDate, setNewExceptionDate] = useState('');
+  const [newExceptionIsClosed, setNewExceptionIsClosed] = useState(true);
+  const [newExceptionReason, setNewExceptionReason] = useState('عطلة رسمية');
+  const [newExceptionCapacity, setNewExceptionCapacity] = useState(20);
+  const [savingException, setSavingException] = useState(false);
 
   // Admin Audit Logs State
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
@@ -417,6 +443,172 @@ export default function StaffDashboardPage() {
     } catch (e) {
       console.error(e);
       alert('حدث خطأ أثناء الحفظ');
+    }
+  }
+
+  // Admin Create Clinic
+  async function handleCreateClinic(e: React.FormEvent) {
+    e.preventDefault();
+    const token = localStorage.getItem('bsch_staff_token');
+    if (!token) return;
+    if (!newClinicName.trim()) {
+      alert('يرجى إدخال اسم العيادة');
+      return;
+    }
+    if (!newClinicLocation.trim()) {
+      alert('يرجى إدخال موقع العيادة الداخلي');
+      return;
+    }
+    setCreatingClinic(true);
+    try {
+      const res = await fetch('/api/staff/clinics', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: newClinicName.trim(),
+          description: newClinicDesc.trim() || undefined,
+          location: newClinicLocation.trim(),
+          workingHours: newClinicHours.trim(),
+          daysOfWeek: newClinicDays,
+          maxDailySlots: Number(newClinicCapacity) || 20,
+          instructions: newClinicInstructions.trim() || undefined,
+          requiredDocuments: newClinicDocs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(data.message || 'تم إنشاء العيادة بنجاح');
+        setShowCreateClinicModal(false);
+        setNewClinicName('');
+        setNewClinicDesc('');
+        setNewClinicLocation('');
+        setNewClinicInstructions('');
+        fetchAdminClinics();
+      } else {
+        alert(data.error || 'تعذر إنشاء العيادة');
+      }
+    } catch {
+      alert('حدث خطأ أثناء إنشاء العيادة');
+    } finally {
+      setCreatingClinic(false);
+    }
+  }
+
+  // Admin Delete / Deactivate Clinic
+  async function handleDeleteClinic(clinicId: string, clinicName: string) {
+    const token = localStorage.getItem('bsch_staff_token');
+    if (!token) return;
+    const confirmed = window.confirm(
+      `هل أنت متأكد من حذف أو إيقاف عيادة "${clinicName}"؟\nملاحظة: إذا كان للعيادة حجوزات سابقة، فسيتم إيقاف تفعيلها مؤقتاً لحماية تاريخ المرضى.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/staff/clinics/${clinicId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(data.message || 'تمت معالجة العملية بنجاح');
+        fetchAdminClinics();
+      } else {
+        alert(data.error || 'تعذر حذف العيادة');
+      }
+    } catch {
+      alert('حدث خطأ في الاتصال بالخادم');
+    }
+  }
+
+  // Schedules Modal Handlers
+  async function openSchedulesModal(clinic: Clinic) {
+    setManagingSchedulesClinic(clinic);
+    setNewExceptionCapacity(clinic.maxDailySlots);
+    const token = localStorage.getItem('bsch_staff_token');
+    if (!token) return;
+    setLoadingSchedules(true);
+    try {
+      const res = await fetch(`/api/staff/clinics/${clinic.id}/schedules`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.success && data.schedules) {
+        setClinicSchedulesList(data.schedules);
+      }
+    } catch {
+      console.error('Error fetching schedules');
+    } finally {
+      setLoadingSchedules(false);
+    }
+  }
+
+  async function handleSaveScheduleException(e: React.FormEvent) {
+    e.preventDefault();
+    if (!managingSchedulesClinic || !newExceptionDate) {
+      alert('يرجى اختيار التاريخ');
+      return;
+    }
+    const token = localStorage.getItem('bsch_staff_token');
+    if (!token) return;
+    setSavingException(true);
+    try {
+      const res = await fetch(`/api/staff/clinics/${managingSchedulesClinic.id}/schedules`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          scheduleDate: newExceptionDate,
+          isClosed: newExceptionIsClosed,
+          closureReason: newExceptionIsClosed ? newExceptionReason : undefined,
+          maxCapacity: !newExceptionIsClosed ? Number(newExceptionCapacity) : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('تم حفظ استثناء التقويم بنجاح');
+        setNewExceptionDate('');
+        openSchedulesModal(managingSchedulesClinic);
+      } else {
+        alert(data.error || 'تعذر حفظ الاستثناء');
+      }
+    } catch {
+      alert('حدث خطأ أثناء حفظ الاستثناء');
+    } finally {
+      setSavingException(false);
+    }
+  }
+
+  async function handleDeleteScheduleException(scheduleDate: string) {
+    if (!managingSchedulesClinic) return;
+    const token = localStorage.getItem('bsch_staff_token');
+    if (!token) return;
+    const confirmed = window.confirm(`هل أنت متأكد من حذف استثناء تاريخ ${scheduleDate}؟`);
+    if (!confirmed) return;
+    try {
+      const res = await fetch(`/api/staff/clinics/${managingSchedulesClinic.id}/schedules`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ scheduleDate }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        openSchedulesModal(managingSchedulesClinic);
+      } else {
+        alert(data.error || 'تعذر حذف الاستثناء');
+      }
+    } catch {
+      alert('حدث خطأ أثناء الحذف');
     }
   }
 
@@ -921,87 +1113,123 @@ export default function StaffDashboardPage() {
         {/* TAB 2: ADMIN CLINICS MANAGEMENT */}
         {activeTab === 'CLINICS' && isAdmin && (
           <div className="bg-white rounded-2xl border border-[#E2E8EE] p-6 shadow-2xs space-y-6">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
               <div>
-                <h3 className="text-lg font-bold text-[#124E4A]">إدارة العيادات والسعة اليومية</h3>
+                <h3 className="text-lg font-bold text-[#124E4A]">إدارة العيادات وجداول التشغيل</h3>
                 <p className="text-xs text-[#8493A6]">
-                  تعديل حالة العيادة (مفعلة / متوقفة مؤقتاً)، السعة القصوى، والموقع الداخلي
+                  إنشاء وتعديل العيادات، ضبط أيام وساعات العمل، السعة اليومية، واستثناءات التقويم والعطلات
                 </p>
               </div>
-              <button
-                onClick={fetchAdminClinics}
-                className="p-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-500"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowCreateClinicModal(true)}
+                  className="px-4 py-2 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>إضافة عيادة جديدة</span>
+                </button>
+                <button
+                  onClick={fetchAdminClinics}
+                  className="p-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-500"
+                  title="تحديث القائمة"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {loadingAdminClinics ? (
               <div className="p-8 text-center text-xs text-[#8493A6]">جاري تحميل العيادات...</div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {adminClinics.map((clinic) => (
-                  <div
-                    key={clinic.id}
-                    className="p-4 rounded-xl border border-[#E2E8EE] bg-slate-50/50 hover:bg-white transition-all space-y-3"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-base text-[#124E4A]">{clinic.name}</span>
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-3xs font-bold ${
-                            clinic.isHospitalConfirmed
-                              ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                              : 'bg-amber-100 text-amber-800 border border-amber-200'
-                          }`}
+                {adminClinics.map((clinic) => {
+                  const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+                  const workingDaysStr = (clinic.daysOfWeek || [])
+                    .map((d) => dayNames[d])
+                    .filter(Boolean)
+                    .join('، ');
+
+                  return (
+                    <div
+                      key={clinic.id}
+                      className="p-4 rounded-xl border border-[#E2E8EE] bg-slate-50/50 hover:bg-white transition-all space-y-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-base text-[#124E4A]">{clinic.name}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-3xs font-bold ${
+                              clinic.isHospitalConfirmed
+                                ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                                : 'bg-amber-100 text-amber-800 border border-amber-200'
+                            }`}
+                          >
+                            {clinic.isHospitalConfirmed ? 'معتمدة رسمياً' : 'بيانات استرشادية'}
+                          </span>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full text-2xs font-bold ${
+                              clinic.isActive
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-red-100 text-red-800'
+                            }`}
+                          >
+                            {clinic.isActive ? 'مفعلة ونشطة' : 'متوقفة مؤقتاً'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {clinic.description && (
+                        <p className="text-xs text-[#8493A6]">{clinic.description}</p>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2 text-2xs text-[#163C3A] pt-2 border-t border-slate-200">
+                        <div>الموقع: <span className="font-semibold">{clinic.location}</span></div>
+                        <div>المواعيد: <span className="font-mono">{clinic.workingHours}</span></div>
+                        <div>السعة اليومية: <span className="font-bold text-[#087F78]">{clinic.maxDailySlots} مريض</span></div>
+                        <div className="col-span-2">أيام العمل: <span className="font-medium text-slate-600">{workingDaysStr || 'غير محدد'}</span></div>
+                      </div>
+
+                      <div className="pt-2 flex flex-wrap items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => openSchedulesModal(clinic)}
+                          className="px-2.5 py-1.5 rounded-lg border border-teal-200 bg-teal-50 hover:bg-teal-100 text-[#087F78] text-2xs font-bold flex items-center gap-1"
                         >
-                          {clinic.isHospitalConfirmed ? 'معتمدة رسمياً' : 'بيانات استرشادية'}
-                        </span>
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full text-2xs font-bold ${
+                          <CalendarDays className="w-3.5 h-3.5" />
+                          <span>استثناءات التقويم</span>
+                        </button>
+
+                        <button
+                          onClick={() => setEditingClinic({ ...clinic })}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#087F78] text-white hover:bg-[#124E4A] text-2xs font-bold"
+                        >
+                          تعديل الإعدادات
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            const updated = { ...clinic, isActive: !clinic.isActive };
+                            handleSaveClinic(updated);
+                          }}
+                          className={`px-2.5 py-1.5 rounded-lg text-2xs font-bold transition-colors ${
                             clinic.isActive
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-red-100 text-red-800'
+                              ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+                              : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
                           }`}
                         >
-                          {clinic.isActive ? 'مفعلة ونشطة' : 'متوقفة مؤقتاً'}
-                        </span>
+                          {clinic.isActive ? 'تعطيل مؤقت' : 'تفعيل العيادة'}
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteClinic(clinic.id, clinic.name)}
+                          className="p-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 text-2xs font-bold"
+                          title="حذف أو إيقاف العيادة بأمان"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
-
-                    <p className="text-xs text-[#8493A6]">{clinic.description}</p>
-
-                    <div className="grid grid-cols-2 gap-2 text-2xs text-[#163C3A] pt-2 border-t border-slate-200">
-                      <div>الموقع: <span className="font-semibold">{clinic.location}</span></div>
-                      <div>المواعيد: <span className="font-mono">{clinic.workingHours}</span></div>
-                      <div>السعة اليومية: <span className="font-bold text-[#087F78]">{clinic.maxDailySlots} مريض</span></div>
-                      <div>مدة الكشف: <span className="font-mono">{clinic.slotDurationMinutes} دقيقة</span></div>
-                    </div>
-
-                    <div className="pt-2 flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => {
-                          const updated = { ...clinic, isActive: !clinic.isActive };
-                          handleSaveClinic(updated);
-                        }}
-                        className={`px-3 py-1.5 rounded-lg text-2xs font-bold transition-colors ${
-                          clinic.isActive
-                            ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
-                            : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                        }`}
-                      >
-                        {clinic.isActive ? 'تعطيل مؤقت' : 'تفعيل العيادة'}
-                      </button>
-
-                      <button
-                        onClick={() => setEditingClinic({ ...clinic })}
-                        className="px-3 py-1.5 rounded-lg bg-[#087F78] text-white hover:bg-[#124E4A] text-2xs font-bold"
-                      >
-                        تعديل السعة والإعدادات
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1268,7 +1496,7 @@ export default function StaffDashboardPage() {
       {/* MODAL 3: EDIT CLINIC (ADMIN) */}
       {editingClinic && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 text-right shadow-xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 text-right shadow-xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="text-base font-bold text-[#124E4A] flex items-center gap-2">
                 <Sliders className="w-5 h-5 text-[#087F78]" />
@@ -1283,6 +1511,16 @@ export default function StaffDashboardPage() {
             </div>
 
             <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">اسم العيادة</label>
+                <input
+                  type="text"
+                  value={editingClinic.name}
+                  onChange={(e) => setEditingClinic({ ...editingClinic, name: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
+                />
+              </div>
+
               <div>
                 <label className="block text-xs font-bold text-[#163C3A] mb-1">الموقع الداخلي</label>
                 <input
@@ -1314,24 +1552,76 @@ export default function StaffDashboardPage() {
                 </div>
               </div>
 
+              {/* Weekly Working Days Checkboxes */}
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1.5">
+                  أيام العمل الأسبوعية الرسمية
+                </label>
+                <div className="grid grid-cols-4 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
+                  {[
+                    { id: 6, label: 'السبت' },
+                    { id: 0, label: 'الأحد' },
+                    { id: 1, label: 'الإثنين' },
+                    { id: 2, label: 'الثلاثاء' },
+                    { id: 3, label: 'الأربعاء' },
+                    { id: 4, label: 'الخميس' },
+                    { id: 5, label: 'الجمعة' },
+                  ].map((day) => {
+                    const isChecked = (editingClinic.daysOfWeek || []).includes(day.id);
+                    return (
+                      <label key={day.id} className="flex items-center gap-1.5 cursor-pointer text-2xs font-bold text-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            const cur = editingClinic.daysOfWeek || [];
+                            const updated = e.target.checked
+                              ? [...cur, day.id].sort()
+                              : cur.filter((d) => d !== day.id);
+                            setEditingClinic({ ...editingClinic, daysOfWeek: updated });
+                          }}
+                          className="rounded border-slate-300 text-[#087F78] focus:ring-[#087F78]"
+                        />
+                        <span>{day.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-bold text-[#163C3A] mb-1">
-                  تعليمات العيادة والأوراق المطلوبة
+                  المستندات المطلوبة للعيادة (مستند في كل سطر)
                 </label>
                 <textarea
-                  rows={3}
+                  rows={2}
+                  value={(editingClinic.requiredDocuments || []).join('\n')}
+                  onChange={(e) =>
+                    setEditingClinic({
+                      ...editingClinic,
+                      requiredDocuments: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي&#10;صورة بطاقة ولي الأمر..."
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78] placeholder:text-slate-400 resize-y"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  تعليمات وإرشادات العيادة العامة
+                </label>
+                <textarea
+                  rows={2}
                   value={editingClinic.instructions || ''}
                   onChange={(e) => setEditingClinic({ ...editingClinic, instructions: e.target.value })}
                   placeholder="اكتب التعليمات والتحاليل أو الفحوصات المطلوبة من ولي الأمر عند الحضور..."
                   className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78] placeholder:text-slate-400 resize-y"
                 />
-                <p className="text-3xs text-[#8493A6] mt-0.5">
-                  تظهر هذه الإرشادات للمرضى ديناميكياً في صفحة الحجز فور اختيار العيادة.
-                </p>
               </div>
 
               <div>
-                <label className="flex items-center gap-2 cursor-pointer pt-2">
+                <label className="flex items-center gap-2 cursor-pointer pt-1">
                   <input
                     type="checkbox"
                     checked={editingClinic.isHospitalConfirmed ?? false}
@@ -1340,7 +1630,6 @@ export default function StaffDashboardPage() {
                   />
                   <span className="text-xs font-bold text-[#163C3A]">اعتماد بيانات العيادة رسمياً من إدارة المستشفى</span>
                 </label>
-                <p className="text-3xs text-[#8493A6] mr-5">تأكيد صحة اسم العيادة وموقعها ومواعيدها وسعتها رسمياً</p>
               </div>
             </div>
 
@@ -1358,6 +1647,291 @@ export default function StaffDashboardPage() {
                 className="px-5 py-2 rounded-xl text-xs font-bold bg-[#087F78] hover:bg-[#124E4A] text-white shadow-xs"
               >
                 حفظ التعديلات
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: CREATE CLINIC (ADMIN) */}
+      {showCreateClinicModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 text-right shadow-xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-bold text-[#124E4A] flex items-center gap-2">
+                <Plus className="w-5 h-5 text-[#087F78]" />
+                <span>إضافة عيادة تخصصية جديدة</span>
+              </h3>
+              <button
+                onClick={() => setShowCreateClinicModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateClinic} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  اسم العيادة <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newClinicName}
+                  onChange={(e) => setNewClinicName(e.target.value)}
+                  placeholder="مثال: عيادة السمعيات، عيادة حساسية الصدر..."
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  الموقع الداخلي بالمستشفى <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newClinicLocation}
+                  onChange={(e) => setNewClinicLocation(e.target.value)}
+                  placeholder="مثال: الدور الأول - مبنى العيادات الخارجية"
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-[#163C3A] mb-1">السعة اليومية للعيادة</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newClinicCapacity}
+                    onChange={(e) => setNewClinicCapacity(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs font-mono focus:border-[#087F78]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-[#163C3A] mb-1">مواعيد العمل الرسمية</label>
+                  <input
+                    type="text"
+                    value={newClinicHours}
+                    onChange={(e) => setNewClinicHours(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs font-mono focus:border-[#087F78]"
+                  />
+                </div>
+              </div>
+
+              {/* Days of Week */}
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1.5">
+                  أيام العمل الأسبوعية
+                </label>
+                <div className="grid grid-cols-4 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
+                  {[
+                    { id: 6, label: 'السبت' },
+                    { id: 0, label: 'الأحد' },
+                    { id: 1, label: 'الإثنين' },
+                    { id: 2, label: 'الثلاثاء' },
+                    { id: 3, label: 'الأربعاء' },
+                    { id: 4, label: 'الخميس' },
+                    { id: 5, label: 'الجمعة' },
+                  ].map((day) => {
+                    const isChecked = newClinicDays.includes(day.id);
+                    return (
+                      <label key={day.id} className="flex items-center gap-1.5 cursor-pointer text-2xs font-bold text-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            const updated = e.target.checked
+                              ? [...newClinicDays, day.id].sort()
+                              : newClinicDays.filter((d) => d !== day.id);
+                            setNewClinicDays(updated);
+                          }}
+                          className="rounded border-slate-300 text-[#087F78] focus:ring-[#087F78]"
+                        />
+                        <span>{day.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  المستندات المطلوبة للعيادة (مستند في كل سطر)
+                </label>
+                <textarea
+                  rows={2}
+                  value={newClinicDocs}
+                  onChange={(e) => setNewClinicDocs(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                  تعليمات وإرشادات العيادة
+                </label>
+                <textarea
+                  rows={2}
+                  value={newClinicInstructions}
+                  onChange={(e) => setNewClinicInstructions(e.target.value)}
+                  placeholder="الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى..."
+                  className="w-full px-3 py-2 rounded-xl border border-[#E2E8EE] text-xs focus:border-[#087F78]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateClinicModal(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingClinic}
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-[#087F78] hover:bg-[#124E4A] text-white shadow-xs"
+                >
+                  {creatingClinic ? 'جاري الإنشاء...' : 'إضافة العيادة الآن'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: CALENDAR SCHEDULE EXCEPTIONS & CLOSURES (ADMIN) */}
+      {managingSchedulesClinic && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 text-right shadow-xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-bold text-[#124E4A] flex items-center gap-2">
+                <CalendarDays className="w-5 h-5 text-[#087F78]" />
+                <span>استثناءات التقويم والعطلات — {managingSchedulesClinic.name}</span>
+              </h3>
+              <button
+                onClick={() => setManagingSchedulesClinic(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Add Exception Form */}
+            <form onSubmit={handleSaveScheduleException} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+              <span className="text-xs font-bold text-[#124E4A] block">إضافة استثناء تقويم جديد (عطلة أو تشغيل إضافي):</span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs font-bold text-slate-700 mb-1">التاريخ المحدد</label>
+                  <input
+                    type="date"
+                    required
+                    value={newExceptionDate}
+                    onChange={(e) => setNewExceptionDate(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold text-slate-700 mb-1">نوع الاستثناء</label>
+                  <select
+                    value={newExceptionIsClosed ? 'CLOSED' : 'OPEN'}
+                    onChange={(e) => setNewExceptionIsClosed(e.target.value === 'CLOSED')}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold bg-white"
+                  >
+                    <option value="CLOSED">إغلاق عطلة رسمية أو طارئة</option>
+                    <option value="OPEN">تشغيل استثنائي / سعة خاصة</option>
+                  </select>
+                </div>
+              </div>
+
+              {newExceptionIsClosed ? (
+                <div>
+                  <label className="block text-2xs font-bold text-slate-700 mb-1">سبب الإغلاق</label>
+                  <input
+                    type="text"
+                    value={newExceptionReason}
+                    onChange={(e) => setNewExceptionReason(e.target.value)}
+                    placeholder="مثال: عطلة المولد النبوي، صيانة طارئة..."
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-2xs font-bold text-slate-700 mb-1">السعة الاستثنائية لهذا اليوم</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newExceptionCapacity}
+                    onChange={(e) => setNewExceptionCapacity(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono bg-white"
+                  />
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={savingException}
+                className="w-full py-2 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all shadow-xs"
+              >
+                {savingException ? 'جاري الحفظ...' : 'حفظ استثناء التقويم'}
+              </button>
+            </form>
+
+            {/* List of existing exceptions */}
+            <div className="space-y-2">
+              <span className="text-xs font-bold text-[#124E4A] block">الاستثناءات والعطلات المسجلة:</span>
+              {loadingSchedules ? (
+                <div className="p-4 text-center text-xs text-slate-400">جاري تحميل الاستثناءات...</div>
+              ) : clinicSchedulesList.length === 0 ? (
+                <div className="p-4 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-100">
+                  لا توجد استثناءات مسجلة (العيادة تعمل وفق جدولها الأسبوعي الافتراضي).
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {clinicSchedulesList.map((sched) => (
+                    <div
+                      key={sched.id || sched.scheduleDate}
+                      className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <strong className="font-mono text-sm text-[#124E4A]">{sched.scheduleDate}</strong>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-3xs font-bold ${
+                              sched.isClosed ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {sched.isClosed ? 'مغلقة (عطلة)' : `تشغيل بسعة ${sched.maxCapacity}`}
+                          </span>
+                        </div>
+                        {sched.closureReason && (
+                          <p className="text-2xs text-slate-500 mt-0.5">{sched.closureReason}</p>
+                        )}
+                      </div>
+
+                      <button
+                        onClick={() => handleDeleteScheduleException(sched.scheduleDate)}
+                        className="text-red-500 hover:text-red-700 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
+                        title="حذف الاستثناء والعودة للجدول الأسبوعي"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 text-left">
+              <button
+                type="button"
+                onClick={() => setManagingSchedulesClinic(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                إغلاق النافذة
               </button>
             </div>
           </div>

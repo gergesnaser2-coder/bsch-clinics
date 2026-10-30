@@ -30,11 +30,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const { appointmentTime: _removedTime, ...restAppointment } = result.appointment;
+    const sanitizedAppointment = {
+      ...restAppointment,
+      attendanceGuidance: 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال بالمستشفى',
+    };
+
     return NextResponse.json(
       {
         success: true,
         message: 'تم تسجيل طلب الحجز بنجاح',
-        appointment: result.appointment,
+        appointment: sanitizedAppointment,
       },
       { status: 201 }
     );

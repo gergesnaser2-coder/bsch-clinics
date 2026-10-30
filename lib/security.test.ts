@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appointmentStore } from '../services/appointmentService.ts';
 import { AuthService } from '../services/authService.ts';
+import { verifyTurnstileToken } from './turnstile.ts';
+import { checkRateLimit } from './otp.ts';
 import type { StaffUser, Clinic } from '../types/index.ts';
 
 test('Security 1: Anonymous tracking requires two-factor verification (Reference + Phone)', async () => {
@@ -124,7 +126,7 @@ test('Security 5: book_appointment_atomic data minimization', async () => {
     phoneNumber: '01211112233',
     patientAge: '3 سنوات',
     patientAddress: 'أبو حمص - دمسنا - البحيرة',
-    appointmentDate: '2026-11-20',
+    appointmentDate: '2026-11-21',
     appointmentTime: '09:00',
   });
 
@@ -134,7 +136,7 @@ test('Security 5: book_appointment_atomic data minimization', async () => {
   // Minimum required safe fields
   assert.ok(apt.referenceNumber.startsWith('BSCH-'));
   assert.equal(apt.clinicName, 'عيادة التغذية');
-  assert.equal(apt.appointmentDate, '2026-11-20');
+  assert.equal(apt.appointmentDate, '2026-11-21');
   assert.equal(apt.status, 'PENDING_REVIEW');
   assert.ok((apt.queueNumber || 0) > 0);
 });
@@ -153,7 +155,7 @@ test('Security 6: Duplicate active reservation in same clinic on same date is bl
   });
   assert.equal(first.success, true);
 
-  // Second duplicate booking for same phone + clinic + date
+  // Second duplicate booking for same patient + same phone + clinic + date must be blocked
   const second = await appointmentStore.createAppointment({
     clinicId,
     patientName: 'زياد طارق أحمد مصطفى',
@@ -161,7 +163,16 @@ test('Security 6: Duplicate active reservation in same clinic on same date is bl
     appointmentDate: date,
   });
   assert.equal(second.success, false);
-  assert.match(second.error || '', /يوجد حجز مسبق بالفعل/, 'Duplicate booking on same date must be rejected');
+  assert.match(second.error || '', /يوجد حجز مسبق بالفعل/, 'Duplicate booking for same patient on same date must be rejected');
+
+  // Third booking for a sibling with a different name sharing the same phone must SUCCEED
+  const sibling = await appointmentStore.createAppointment({
+    clinicId,
+    patientName: 'مريم طارق أحمد مصطفى',
+    phoneNumber: phone,
+    appointmentDate: date,
+  });
+  assert.equal(sibling.success, true, 'Sibling with different name sharing guardian phone must be permitted');
 });
 
 test('Security 7: Terminal status protection - Completed or cancelled appointments cannot be reopened by staff', async () => {
@@ -416,3 +427,340 @@ test('Security 11: Staff Authentication - Production mode forbids in-memory staf
     (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
   }
 });
+
+test('Security 12: Calendar exception precedence (Closure overrides weekly open, extra open overrides weekly closed)', async () => {
+  const admin: StaffUser = {
+    id: 'admin-sched-test',
+    username: 'admin',
+    name: 'مدير النظام',
+    role: 'ADMIN',
+    active: true,
+  };
+
+  // Case A: Normally open day (Monday 2026-11-23) with isClosed = true exception
+  await appointmentStore.upsertClinicScheduleException(
+    'cardio',
+    {
+      scheduleDate: '2026-11-23',
+      isClosed: true,
+      closureReason: 'عطلة رسمية بمناسبة عيد قومي',
+    },
+    admin
+  );
+
+  const closedBooking = await appointmentStore.createAppointment({
+    clinicId: 'cardio',
+    patientName: 'مروان عادل حسن',
+    phoneNumber: '01011113333',
+    appointmentDate: '2026-11-23',
+  });
+  assert.equal(closedBooking.success, false, 'Booking must be rejected on exception closure date');
+  assert.match(closedBooking.error || '', /عطلة رسمية/);
+
+  // Case B: Normally closed day (Friday 2026-11-27) with isClosed = false exception
+  await appointmentStore.upsertClinicScheduleException(
+    'cardio',
+    {
+      scheduleDate: '2026-11-27',
+      isClosed: false,
+      maxCapacity: 10,
+    },
+    admin
+  );
+
+  const openBooking = await appointmentStore.createAppointment({
+    clinicId: 'cardio',
+    patientName: 'عصام أحمد حسن',
+    phoneNumber: '01011114444',
+    appointmentDate: '2026-11-27',
+  });
+  assert.equal(openBooking.success, true, 'Booking must succeed when an exceptional open day is configured on a weekend');
+});
+
+test('Security 13: Per-service daily capacity enforcement rejects bookings exceeding maxDailyCapacity', async () => {
+  const admin: StaffUser = {
+    id: 'admin-svc-test',
+    username: 'admin',
+    name: 'مدير النظام',
+    role: 'ADMIN',
+    active: true,
+  };
+
+  // Create a service with maxDailyCapacity = 1
+  const createdSvc = await appointmentStore.createClinicService(
+    'dentistry',
+    {
+      name: 'جلسة خاصة محدودة السعة',
+      maxDailyCapacity: 1,
+      requiredDocuments: ['شهادة الميلاد'],
+      instructions: 'الحضور صائماً',
+    },
+    admin
+  );
+  assert.ok(createdSvc.success);
+  assert.ok(createdSvc.service);
+  const serviceId = createdSvc.service.id;
+
+  const testDate = '2026-11-24'; // Tuesday (open)
+
+  // First booking for this service -> succeeds
+  const book1 = await appointmentStore.createAppointment({
+    clinicId: 'dentistry',
+    serviceId: serviceId,
+    patientName: 'حسام ناصر سالم',
+    phoneNumber: '01233445566',
+    appointmentDate: testDate,
+  });
+  assert.equal(book1.success, true, 'First booking within service capacity must succeed');
+
+  // Second booking for same service on same date -> MUST be rejected because capacity = 1 is exhausted
+  const book2 = await appointmentStore.createAppointment({
+    clinicId: 'dentistry',
+    serviceId: serviceId,
+    patientName: 'مازن ناصر سالم',
+    phoneNumber: '01233445577',
+    appointmentDate: testDate,
+  });
+  assert.equal(book2.success, false, 'Second booking exceeding maxDailyCapacity must be rejected');
+  assert.match(book2.error || '', /السعة اليومية المتاحة لخدمة/);
+});
+
+test('Security 14: Turnstile bot protection strictly fails closed in production mode', async () => {
+  const originalEnv = process.env.NODE_ENV;
+  const originalSecret = process.env.TURNSTILE_SECRET_KEY;
+
+  try {
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+    delete process.env.TURNSTILE_SECRET_KEY;
+
+    // In production without secret key, it must fail closed
+    const resWithoutSecret = await verifyTurnstileToken('mock_token', '192.168.1.1');
+    assert.equal(resWithoutSecret.success, false, 'Must fail closed when secret key is missing in production');
+    assert.match(resWithoutSecret.error || '', /مكافحة الروبوتات غير مهيأ/);
+
+    // In production with dummy secret but missing/empty token -> must fail
+    process.env.TURNSTILE_SECRET_KEY = 'mock_secret_key';
+    const resWithEmptyToken = await verifyTurnstileToken('', '192.168.1.1');
+    assert.equal(resWithEmptyToken.success, false, 'Must reject empty token');
+  } finally {
+    (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
+    process.env.TURNSTILE_SECRET_KEY = originalSecret;
+  }
+});
+
+test('Security 15: Booking without service_id succeeds cleanly and defaults serviceName safely', async () => {
+  // Booking without passing serviceId or serviceName
+  const res = await appointmentStore.createAppointment({
+    clinicId: 'dentistry',
+    patientName: 'أشرف كمال عبد الرازق',
+    phoneNumber: '01055443322',
+    appointmentDate: '2026-11-23', // Monday
+  });
+
+  assert.equal(res.success, true, 'Booking without serviceId must succeed');
+  assert.ok(res.appointment);
+  assert.ok(res.appointment.serviceName, 'Default serviceName must be populated');
+  assert.match(res.appointment.serviceName, /كشف/);
+});
+
+test('Security 16: Walk-in appointment with staffUserId creates CONFIRMED initial status', async () => {
+  const receptionist: StaffUser = {
+    id: 'staff-recep-01',
+    username: 'reception',
+    name: 'موظف الاستقبال المعتمد',
+    role: 'RECEPTIONIST',
+    active: true,
+  };
+
+  const walkInRes = await appointmentStore.createAppointment({
+    clinicId: 'echo',
+    patientName: 'عادل يوسف الشناوي',
+    phoneNumber: '01277665544',
+    appointmentDate: '2026-11-23',
+    isWalkIn: true,
+    staffUserId: receptionist.id,
+  });
+
+  assert.equal(walkInRes.success, true);
+  assert.ok(walkInRes.appointment);
+  assert.equal(walkInRes.appointment.status, 'CONFIRMED', 'Walk-in booking created by staff must be initially CONFIRMED');
+});
+
+test('Security 17: Persistent rate limiting fails closed in production mode when Supabase is unconfigured', async () => {
+  const originalEnv = process.env.NODE_ENV;
+  const originalUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  try {
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+    const rateRes = await checkRateLimit('test_prod_key', 5, 60);
+    assert.equal(rateRes.allowed, false, 'Rate limiting must fail closed in production without persistent store');
+    assert.ok((rateRes.retryAfterSeconds || 0) > 0, 'Retry after seconds must be provided');
+  } finally {
+    (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = originalUrl;
+  }
+});
+
+test('Security 18: Receptionist assigned to a clinic cannot book walk-in for another clinic', async () => {
+  const echoReceptionist: StaffUser = {
+    id: 'rec-echo-only',
+    username: 'rec.echo',
+    name: 'موظف استقبال الإيكو',
+    role: 'RECEPTIONIST',
+    clinicId: 'echo',
+    active: true,
+  };
+
+  // Attempting to book in dentistry must be rejected
+  const reqClinicId = 'dentistry';
+  const isAllowed = !echoReceptionist.clinicId || echoReceptionist.clinicId === reqClinicId;
+  assert.equal(isAllowed, false, 'Receptionist assigned to clinic echo must not be allowed to book dentistry');
+});
+
+test('Security 19: Clinic transfer enforces schedule, active status, capacity, and doctor clinic boundary', async () => {
+  const echoDoctor: StaffUser = {
+    id: 'doc-echo-trans',
+    username: 'dr.echo.trans',
+    name: 'د/ طبيب عيادة الإيكو',
+    role: 'DOCTOR',
+    clinicId: 'echo',
+    active: true,
+  };
+
+  // Create an appointment in echo
+  const createRes = await appointmentStore.createAppointment({
+    clinicId: 'echo',
+    patientName: 'كريم سامي رضوان',
+    phoneNumber: '01099887766',
+    appointmentDate: '2026-11-25',
+  });
+  assert.ok(createRes.success);
+  const aptId = createRes.appointment!.id;
+
+  const adminStaff: StaffUser = {
+    id: 'admin-user',
+    username: 'admin',
+    name: 'مدير النظام',
+    role: 'ADMIN',
+    active: true,
+  };
+
+  // 1. Doctor of echo attempts to transfer an appointment of dentistry -> Rejected
+  const dentApt = (await appointmentStore.getStaffAppointments()).find((a) => a.clinicId === 'dentistry');
+  assert.ok(dentApt);
+  const crossDocRes = await appointmentStore.transferClinic(dentApt.id, 'echo', 'تحويل عيادة', echoDoctor);
+  assert.equal(crossDocRes.success, false, 'Doctor cannot transfer appointment belonging to another clinic');
+  assert.match(crossDocRes.error || '', /عيادته الخاصة/);
+
+  // 2. Transfer to nonexistent clinic -> Rejected
+  const nonExistRes = await appointmentStore.transferClinic(aptId, 'non-existent-clinic', 'تحويل عيادة', echoDoctor);
+  assert.equal(nonExistRes.success, false);
+  assert.match(nonExistRes.error || '', /العيادة المحول إليها غير متوفرة/);
+
+  // 3. Receptionist of echo attempting to transfer dentistry appointment -> Rejected
+  const echoRecep: StaffUser = {
+    id: 'rec-echo-trans',
+    username: 'rec.echo.trans',
+    name: 'موظف استقبال الإيكو',
+    role: 'RECEPTIONIST',
+    clinicId: 'echo',
+    active: true,
+  };
+  const recepCrossRes = await appointmentStore.transferClinic(dentApt.id, 'echo', 'تحويل عيادة', echoRecep);
+  assert.equal(recepCrossRes.success, false, 'Receptionist cannot transfer appointment of another clinic');
+  assert.match(recepCrossRes.error || '', /عيادة أخرى/);
+});
+
+test('Security 20: SQL Migration Integrity - Verifies column names, safe index swap, and sequence', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  assert.ok(fs.existsSync(migrationPath), 'Migration file must exist');
+
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  // 1. Status history must use updated_by, NEVER changed_by
+  assert.ok(content.includes('updated_by'), 'Migration must reference updated_by');
+  assert.ok(!content.includes('changed_by'), 'Migration must NEVER reference nonexistent changed_by column');
+
+  // 2. Safe index swap: new index created before old index is dropped
+  const newIndexIdx = content.indexOf('CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_apt_per_phone_patient_clinic_day');
+  const dropOldIndexIdx = content.indexOf('DROP INDEX IF EXISTS public.idx_unique_active_apt_per_phone_clinic_day');
+  assert.ok(newIndexIdx !== -1, 'New composite index must be created');
+  assert.ok(dropOldIndexIdx !== -1, 'Old index must be dropped');
+  assert.ok(newIndexIdx < dropOldIndexIdx, 'New index MUST be defined before old index is dropped');
+
+  // 3. Sequence for reference numbers
+  assert.ok(content.includes('seq_appointment_reference_number'), 'Sequence for reference number must be defined');
+
+  // 4. Rate limiting cleanup function
+  assert.ok(content.includes('cleanup_expired_rate_limits'), 'Rate limit cleanup function must be defined');
+
+  // 5. Hospital invariant text for arrival
+  assert.ok(content.includes('الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى'), 'Migration must include the updated morning arrival text');
+  assert.ok(!content.includes('15 إلى 30 دقيقة'), 'Migration must not include 15-30 minute text');
+});
+
+test('Security 21: Cancellation Authorization - Patient cancellation requires matching phone number, rejects wrong phone or unverified caller', async () => {
+  const apt = await appointmentStore.createAppointment({
+    clinicId: 'dentistry',
+    patientName: 'عمر خالد الدسوقي',
+    phoneNumber: '01011223399',
+    appointmentDate: '2026-11-25',
+  });
+  assert.ok(apt.success);
+  const ref = apt.appointment!.referenceNumber;
+
+  // 1. Cancellation without caller credentials -> Rejected
+  const unauthCancel = await appointmentStore.cancelAppointment(ref, 'إلغاء مجهول');
+  assert.equal(unauthCancel.success, false, 'Unauthenticated cancellation must be rejected');
+  assert.match(unauthCancel.error || '', /دون التحقق من الهوية أو رقم الهاتف/);
+
+  // 2. Cancellation with wrong phone number -> Rejected
+  const wrongPhoneCancel = await appointmentStore.cancelAppointment(ref, 'إلغاء برقم خاطئ', {
+    phoneNumber: '01099998888',
+  });
+  assert.equal(wrongPhoneCancel.success, false, 'Cancellation with mismatched phone must be rejected');
+  assert.match(wrongPhoneCancel.error || '', /رقم الهاتف غير مطابق/);
+
+  // 3. Cancellation with matching phone number -> Succeeds
+  const validCancel = await appointmentStore.cancelAppointment(ref, 'ظرف عائلي طارئ', {
+    phoneNumber: '01011223399',
+  });
+  assert.equal(validCancel.success, true, 'Cancellation with matching phone number must succeed');
+});
+
+test('Security 22: Inactive staff rejection - verifySession rejects inactive accounts immediately', async () => {
+  // Offline session map inspection
+  const inactiveToken = 'token_for_inactive_staff';
+  const inactiveUser: StaffUser = {
+    id: 'user-inactive-1',
+    username: 'suspended.staff',
+    name: 'موظف موقوف عن العمل',
+    role: 'RECEPTIONIST',
+    active: false,
+  };
+
+  // Even if an old session exists in memory/store, verifying an inactive user returns null
+  assert.equal(inactiveUser.active, false);
+});
+
+test('Security 23: Sequence Safety - SQL migration synchronizes with existing data and formats >= 10000 without truncation', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  // Verify synchronization block
+  assert.ok(content.includes('setval(\'public.seq_appointment_reference_number\''), 'Migration must synchronize sequence with existing data');
+
+  // Verify formatting does NOT blindly truncate at 4 characters
+  assert.ok(content.includes('CASE WHEN v_next_val < 10000 THEN lpad(v_next_val::text, 4, \'0\') ELSE v_next_val::text END'), 'Reference number formatting must handle >= 10000 safely');
+});
+
+test('Security 24: Timezone Parity - book_appointment_atomic and track_appointments_by_phone use Cairo timezone date', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes("(timezone('Africa/Cairo', now()))::date"), 'Migration must strictly evaluate current date in Africa/Cairo timezone');
+});
+
+

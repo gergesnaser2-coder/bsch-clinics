@@ -1,30 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appointmentStore } from '@/services/appointmentService';
-import { normalizeAndValidateEgyptianPhone } from '@/lib/rules';
-import { generateOtp, verifyOtp } from '@/lib/otp';
+import { normalizeAndValidateEgyptianPhone, maskPatientName } from '@/lib/rules';
+import { checkIpRateLimit, checkRateLimit } from '@/lib/otp';
+import { verifyTurnstileToken } from '@/lib/turnstile';
 
 /**
  * POST /api/appointments/track
- * Secure endpoint for Phone-Based Tracking:
+ * Client Confirmed Requirement: Phone-Only Tracking
  *
- * Action 1: Request OTP (body: { action: 'request', phone: string } or body: { phone: string })
- * - Validates Egyptian phone format.
- * - Rate limits generation requests.
- * - Returns a generic uniform message preventing phone-number enumeration.
- * - Never returns plaintext OTP in production.
- *
- * Action 2: Verify OTP & Retrieve Appointments (body: { action: 'verify', phone: string, otp: string })
- * - Uses POST body so phone number and OTP code NEVER appear in URLs, access logs, or referrers.
- * - Enforces server-side expiration, brute-force lockout, and single-use replay protection.
- * - Exposes only sanitized, permitted appointment details for the authenticated phone number.
+ * Privacy & Security Invariants:
+ * 1. Look up appointments by Egyptian guardian phone number only (No SMS OTP or secret booking code required).
+ * 2. Prevent automated scraping & enumeration attacks:
+ *    - Cloudflare Turnstile bot verification (fail-secure in production).
+ *    - Persistent IP rate limiting (15 requests / 10 minutes).
+ *    - Persistent Phone rate limiting (8 requests / 10 minutes per phone).
+ * 3. Extreme Data Minimization:
+ *    - Child's name is partially redacted (e.g. "أحمد ك*** م***").
+ *    - NEVER exposes National ID, address, age, physician internal notes, or database UUIDs.
+ *    - Never exposes user-facing clock time (only attendance date + priority queue guidance).
+ * 4. Uniform behavior: Returns empty list gracefully if no active bookings exist.
  */
 export async function POST(req: NextRequest) {
+  const startTime = Date.now();
   try {
     const body = await req.json().catch(() => ({}));
-    const action = body.action || (body.otp ? 'verify' : 'request');
     const phone = (body.phone || body.phoneNumber || '').toString().trim();
+    const turnstileToken = body.turnstileToken || body.token || '';
 
-    // 1. Phone validation
+    // 1. Validate Egyptian phone format
     const phoneCheck = normalizeAndValidateEgyptianPhone(phone);
     if (!phoneCheck.isValid) {
       return NextResponse.json(
@@ -34,129 +37,68 @@ export async function POST(req: NextRequest) {
     }
 
     const normalizedPhone = phoneCheck.normalized;
+    const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || req.headers.get('x-real-ip') || '127.0.0.1';
 
-    // ACTION: REQUEST OTP
-    if (action === 'request') {
-      const otpGen = await generateOtp(normalizedPhone);
+    // 2. IP Rate Limiting
+    const ipCheck = await checkIpRateLimit(clientIp);
+    if (!ipCheck.allowed) {
+      return NextResponse.json(
+        { error: 'تم تجاوز الحد الأقصى للمحاولات من عنوان شبكتك. يرجى الانتظار والمحاولة لاحقاً.' },
+        { status: 429 }
+      );
+    }
 
-      if (!otpGen.success) {
-        return NextResponse.json(
-          { error: otpGen.error || 'تعذر إرسال رمز التحقق في الوقت الحالي' },
-          { status: 429 }
-        );
-      }
+    // 3. Phone Rate Limiting (Persistent counter per phone)
+    const phoneRateCheck = await checkRateLimit(`track_phone_${normalizedPhone}`, 8, 600);
+    if (!phoneRateCheck.allowed) {
+      return NextResponse.json(
+        { error: 'تم تجاوز الحد الأقصى للاستعلام لهذا الرقم. يرجى الانتظار 10 دقائق قبل إعادة المحاولة.' },
+        { status: 429 }
+      );
+    }
 
-      // Generic response: Does not indicate whether the phone number has appointments in DB,
-      // which completely eliminates phone enumeration vulnerability.
+    // 4. Cloudflare Turnstile Bot Protection (Fails securely in production)
+    const turnstileCheck = await verifyTurnstileToken(turnstileToken, clientIp);
+    if (!turnstileCheck.success) {
+      return NextResponse.json(
+        { error: turnstileCheck.error || 'فشل التحقق الأمني من مكافحة الروبوتات.' },
+        { status: 403 }
+      );
+    }
+
+    // 5. Query active, upcoming appointments (Cairo timezone: date >= today, status != 'CANCELLED')
+    const appointments = await appointmentStore.trackAppointmentsByVerifiedPhone(normalizedPhone);
+
+    // Constant-time mitigation against enumeration timing attacks:
+    // Ensure all requests take at least 300ms
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 300) {
+      await new Promise((resolve) => setTimeout(resolve, 300 - elapsed));
+    }
+
+    if (appointments.length === 0) {
       return NextResponse.json({
         success: true,
-        message: 'تم إرسال رمز التحقق إلى رقم هاتفك المحمول بنجاح.',
-        expiresAt: otpGen.expiresAt,
-        demoNotice: otpGen.demoNotice, // Undefined in production
+        count: 0,
+        appointments: [],
+        message: 'لا توجد مواعيد نشطة قادمة مسجلة لهذا الرقم. يرجى التأكد من الرقم أو حجز موعد جديد.',
       });
     }
 
-    // ACTION: VERIFY OTP & FETCH APPOINTMENTS
-    if (action === 'verify') {
-      const otp = (body.otp || body.code || '').toString().trim();
-
-      if (!otp) {
-        return NextResponse.json(
-          { error: 'يرجى إدخال رمز التحقق المكون من 4 أرقام.' },
-          { status: 400 }
-        );
-      }
-
-      // Strict server-side verification
-      const verifyRes = await verifyOtp(normalizedPhone, otp);
-      if (!verifyRes.valid) {
-        return NextResponse.json(
-          {
-            error: verifyRes.error || 'رمز التحقق غير صحيح أو انتهت صلاحيته.',
-            attemptsRemaining: verifyRes.attemptsRemaining,
-          },
-          { status: 400 }
-        );
-      }
-
-      // OTP verified successfully; retrieve appointments for this verified phone number
-      const appointments = await appointmentStore.trackAppointmentsByVerifiedPhone(normalizedPhone);
-
-      if (appointments.length === 0) {
-        return NextResponse.json({
-          success: true,
-          count: 0,
-          appointments: [],
-          message: 'لا توجد حجوزات مسجلة برقم هذا الهاتف حالياً.',
-        });
-      }
-
-      // Sanitize fields: Expose only permitted appointment data (No national ID, internal staff notes, or full address)
-      const sanitizedAppointments = appointments.map((a) => ({
-        referenceNumber: a.referenceNumber,
-        clinicId: a.clinicId,
-        clinicName: a.clinicName,
-        patientName: a.patientName,
-        appointmentDate: a.appointmentDate,
-        appointmentTime: a.appointmentTime,
-        status: a.status,
-        queueNumber: a.queueNumber,
-      }));
-
-      return NextResponse.json({
-        success: true,
-        count: sanitizedAppointments.length,
-        appointments: sanitizedAppointments,
-      });
-    }
-
-    return NextResponse.json({ error: 'إجراء غير معروف.' }, { status: 400 });
-  } catch (error) {
-    // Log error safely without exposing user phone or credentials
-    console.error('Error in /api/appointments/track POST handler');
-    return NextResponse.json({ error: 'حدث خطأ أثناء معالجة الطلب، يرجى المحاولة لاحقاً.' }, { status: 500 });
-  }
-}
-
-/**
- * GET /api/appointments/track
- *
- * Security notice: Passing OTP in GET query parameters is strictly rejected to prevent
- * exposing authentication tokens in browser history, proxy caches, and webserver access logs.
- */
-export async function GET(req: NextRequest) {
-  const searchParams = req.nextUrl.searchParams;
-  const otp = searchParams.get('otp');
-
-  if (otp) {
-    return NextResponse.json(
-      {
-        error: 'لأسباب أمنية لحماية الخصوصية، يرجى إرسال رمز التحقق عبر طلب POST لتجنب ظهوره في سجلات التصفح.',
-      },
-      { status: 400 }
-    );
-  }
-
-  // Legacy internal two-factor lookup by exact referenceNumber + phone (preserved for internal systems if needed)
-  const ref = searchParams.get('ref') || searchParams.get('referenceNumber') || '';
-  const phone = searchParams.get('phone') || searchParams.get('phoneNumber') || '';
-
-  if (ref && phone) {
-    const phoneCheck = normalizeAndValidateEgyptianPhone(phone);
-    if (!phoneCheck.isValid) {
-      return NextResponse.json({ error: 'رقم الهاتف غير صحيح' }, { status: 400 });
-    }
-
-    const appointments = await appointmentStore.trackAppointment(ref, phoneCheck.normalized);
+    // 6. Strict Data Minimization on response payload
     const sanitizedAppointments = appointments.map((a) => ({
       referenceNumber: a.referenceNumber,
       clinicId: a.clinicId,
       clinicName: a.clinicName,
-      patientName: a.patientName,
+      serviceId: a.serviceId,
+      serviceName: a.serviceName || 'كشف واستشارة طبية',
+      patientName: maskPatientName(a.patientName),
       appointmentDate: a.appointmentDate,
-      appointmentTime: a.appointmentTime,
+      attendanceGuidance: 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال بالمستشفى',
       status: a.status,
       queueNumber: a.queueNumber,
+      requiredDocuments: a.requiredDocuments || [],
+      serviceInstructions: a.serviceInstructions || '',
     }));
 
     return NextResponse.json({
@@ -164,12 +106,23 @@ export async function GET(req: NextRequest) {
       count: sanitizedAppointments.length,
       appointments: sanitizedAppointments,
     });
+  } catch (error) {
+    console.error('Error in /api/appointments/track POST handler:', error);
+    return NextResponse.json(
+      { error: 'حدث خطأ أثناء معالجة الطلب، يرجى المحاولة لاحقاً.' },
+      { status: 500 }
+    );
   }
+}
 
-  return NextResponse.json(
-    {
-      error: 'يرجى استخدام نموذج المتابعة برقم الهاتف المسجل وتأكيد رمز التحقق (OTP) عبر طلب POST.',
-    },
-    { status: 400 }
-  );
+/**
+ * GET /api/appointments/track
+ * Directs users to the secure POST form.
+ */
+export async function GET() {
+  return NextResponse.json({
+    mode: 'PHONE_ONLY',
+    message: 'خدمة متابعة الحجز متاحة عبر إدخال رقم الهاتف المسجل بالحجز.',
+    privacyNotice: 'لحماية خصوصية المرضى، يتم حجب تفاصيل الاسم والبيانات الشخصية ويعرض النظام بيانات الموعد الأساسية فقط.',
+  });
 }

@@ -1,21 +1,22 @@
 /**
  * BSCH Clinics - Secure Persistent OTP Verification Service for Phone-Only Tracking
  *
- * Security Invariants & Compliance:
- * 1. Cryptographically secure random 4-digit code generation using Node.js crypto CSPRNG.
+ * Security Invariants & Compliance (Hardened):
+ * 1. Cryptographically secure random 6-digit code generation using Node.js crypto CSPRNG (100000 - 999999).
  * 2. Persistent storage in Supabase `public.otp_verifications` across serverless instances.
- * 3. Salted SHA-256 Hashing: Only the hash is stored in the database; plaintext codes are never persisted.
- * 4. Strict 5-minute server-side expiration.
- * 5. Replay prevention: OTP record is deleted immediately upon successful verification.
- * 6. Brute-force lockout: Max 5 incorrect attempts before the code is permanently invalidated.
- * 7. Request Rate Limiting: 60-second cooldown between OTP requests for the same phone, and max 5 requests/hour.
- * 8. Zero-logging: Plaintext OTP codes and hashes are never logged to console or logs.
- * 9. Zero production exposure: Plaintext codes are never returned in production API responses.
- * 10. Zero production bypass: Static test code ('1234') is strictly rejected when NODE_ENV === 'production'.
- * 11. Offline Fallback: Controlled in-memory fallback ONLY in dev/testing when Supabase is explicitly unconfigured.
+ * 3. Keyed HMAC-SHA256 Hashing: Only the HMAC digest is stored in the database; plaintext codes are never persisted.
+ * 4. Timing-attack protection via `crypto.timingSafeEqual` for all hash comparisons.
+ * 5. Strict 5-minute server-side expiration.
+ * 6. Replay prevention: OTP record is deleted immediately upon successful verification.
+ * 7. Brute-force lockout: Max 5 incorrect attempts before code is invalidated, retained across re-requests within the hourly window.
+ * 8. Request Rate Limiting: 60-second cooldown per phone, max 5 requests/hour per phone, and per-IP rate limiting.
+ * 9. Zero-logging: Plaintext OTP codes and HMACs are never logged.
+ * 10. Zero production exposure: Plaintext codes and demoNotice are strictly undefined outside development.
+ * 11. Strict dev bypass: Static test code ('123456') is allowed ONLY when `process.env.NODE_ENV === 'development'` (explicit allowlist).
+ * 12. Offline Fallback: Controlled in-memory fallback ONLY in dev/testing when Supabase is explicitly unconfigured.
  */
 
-import { randomInt, createHash } from 'crypto';
+import { randomInt, createHmac, timingSafeEqual } from 'crypto';
 import { createAdminClient, isSupabaseConfigured, isMockStoreAllowed } from './supabase/admin.ts';
 
 export interface OtpEntry {
@@ -30,22 +31,28 @@ export interface OtpEntry {
 // In-memory fallback map strictly for offline development and local unit tests
 const globalForOtp = globalThis as unknown as {
   otpStoreInstance?: Map<string, OtpEntry>;
+  ipRateLimitStoreInstance?: Map<string, { count: number; resetAt: number }>;
 };
 
 const memoryOtpStore = globalForOtp.otpStoreInstance ?? new Map<string, OtpEntry>();
+const memoryIpStore = globalForOtp.ipRateLimitStoreInstance ?? new Map<string, { count: number; resetAt: number }>();
+
 if (process.env.NODE_ENV !== 'production') {
   globalForOtp.otpStoreInstance = memoryOtpStore;
+  globalForOtp.ipRateLimitStoreInstance = memoryIpStore;
 }
 
 // Security Configuration
 export const OTP_CONFIG = {
-  CODE_LENGTH: 4,
+  CODE_LENGTH: 6,
   EXPIRY_MS: 5 * 60 * 1000, // 5 minutes
   MAX_ATTEMPTS: 5,
   REQUEST_COOLDOWN_MS: 60 * 1000, // 60 seconds between requests
   MAX_HOURLY_REQUESTS: 5,
   HOURLY_WINDOW_MS: 60 * 60 * 1000, // 1 hour
-  DEV_BYPASS_CODE: '1234',
+  DEV_BYPASS_CODE: '123456',
+  IP_WINDOW_MS: 10 * 60 * 1000, // 10 minutes
+  MAX_IP_REQUESTS: 15,
 };
 
 export interface GenerateOtpResult {
@@ -63,29 +70,139 @@ export interface VerifyOtpResult {
 }
 
 /**
- * Generate a salted SHA-256 hash of the phone and OTP code.
- * Ensures that even with direct database read access, plaintext codes cannot be recovered.
+ * Generate a keyed HMAC-SHA256 digest of the phone and OTP code using OTP_HASH_SECRET.
  */
 export function hashOtp(phone: string, code: string): string {
   const secret =
     process.env.OTP_HASH_SECRET ||
     process.env.SUPABASE_SECRET_KEY ||
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    'bsch_otp_salt_pediatric_hospital_2026';
-  return createHash('sha256').update(`${phone.trim()}:${code.trim()}:${secret}`).digest('hex');
+    'bsch_otp_hmac_secret_pediatric_hospital_2026';
+
+  return createHmac('sha256', secret)
+    .update(`${phone.trim()}:${code.trim()}`)
+    .digest('hex');
 }
 
 /**
- * Generate a cryptographically secure numeric OTP for a verified phone number.
- * Persists to Supabase `public.otp_verifications` if configured, with rate-limiting and expiration.
+ * Timing-safe string comparison to prevent side-channel timing attacks.
  */
-export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
+export function constantTimeHashCompare(hashA: string, hashB: string): boolean {
+  if (!hashA || !hashB) return false;
+  const bufA = Buffer.from(hashA, 'hex');
+  const bufB = Buffer.from(hashB, 'hex');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Generic persistent rate limiter helper with serverless fallback:
+ * - Checks persistent PostgreSQL atomic rate limit counter via service_role RPC if Supabase is configured.
+ * - Falls back to local memory store for offline development and unit tests.
+ */
+export async function checkRateLimit(
+  key: string,
+  maxRequests: number,
+  windowSeconds: number
+): Promise<{ allowed: boolean; retryAfterSeconds?: number }> {
+  const cleanKey = key.trim();
+  const isProd = process.env.NODE_ENV === 'production';
+
+  // 1. If Supabase is configured, use atomic persistent rate limiting table
+  if (isSupabaseConfigured()) {
+    try {
+      const supabase = createAdminClient();
+      const { data, error } = await (supabase as any).rpc('check_rate_limit', {
+        p_key: cleanKey,
+        p_max_requests: maxRequests,
+        p_window_seconds: windowSeconds,
+      });
+
+      if (!error && data && typeof data === 'object') {
+        const res = data as { allowed: boolean; retry_after_seconds?: number };
+        return {
+          allowed: res.allowed,
+          retryAfterSeconds: res.retry_after_seconds,
+        };
+      }
+
+      if (isProd) {
+        console.error('CRITICAL: Persistent rate limiting RPC failed in production:', error);
+        return { allowed: false, retryAfterSeconds: 60 };
+      }
+    } catch (rpcErr) {
+      if (isProd) {
+        console.error('CRITICAL: Persistent rate limit network/client failure in production:', rpcErr);
+        return { allowed: false, retryAfterSeconds: 60 };
+      }
+      console.warn('Persistent rate limit RPC fallback to memory:', rpcErr);
+    }
+  } else if (isProd) {
+    console.error('CRITICAL: Rate limiting is unconfigured in production (persistent Supabase store required).');
+    return { allowed: false, retryAfterSeconds: 60 };
+  }
+
+  // 2. In-memory fallback (offline tests, local dev)
+  const now = Date.now();
+  const entry = memoryIpStore.get(cleanKey);
+  const windowMs = windowSeconds * 1000;
+
+  if (!entry || entry.resetAt < now) {
+    memoryIpStore.set(cleanKey, { count: 1, resetAt: now + windowMs });
+    return { allowed: true };
+  }
+
+  if (entry.count >= maxRequests) {
+    const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+    return { allowed: false, retryAfterSeconds: retryAfter };
+  }
+
+  entry.count++;
+  return { allowed: true };
+}
+
+/**
+ * Per-IP rate limiting helper:
+ * - Checks persistent PostgreSQL atomic rate limit counter via service_role RPC if Supabase is configured.
+ * - Falls back to local memory store for offline development and unit tests.
+ */
+export async function checkIpRateLimit(ip: string): Promise<{ allowed: boolean; retryAfterSeconds?: number }> {
+  const cleanIp = ip.trim() || '127.0.0.1';
+  // Allow localhost loopback in development without restrictions
+  if (process.env.NODE_ENV === 'development' && (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp === 'localhost')) {
+    return { allowed: true };
+  }
+
+  return checkRateLimit(
+    `ip_limit_${cleanIp}`,
+    OTP_CONFIG.MAX_IP_REQUESTS,
+    Math.ceil(OTP_CONFIG.IP_WINDOW_MS / 1000)
+  );
+}
+
+/**
+ * Generate a cryptographically secure 6-digit OTP for a verified phone number.
+ * Persists to Supabase `public.otp_verifications` if configured, with rate-limiting, IP limits, and expiration.
+ */
+export async function generateOtp(phone: string, clientIp?: string): Promise<GenerateOtpResult> {
   const cleanPhone = phone.trim();
   const now = Date.now();
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isStrictDev = process.env.NODE_ENV === 'development';
 
-  // Generate cryptographically secure 4-digit code (1000 to 9999)
-  const code = randomInt(1000, 10000).toString();
+  // 0. Check IP Rate Limit
+  if (clientIp) {
+    const ipCheck = await checkIpRateLimit(clientIp);
+    if (!ipCheck.allowed) {
+      return {
+        success: false,
+        cooldownSeconds: ipCheck.retryAfterSeconds,
+        error: `تم تجاوز معدل الطلبات من هذا العنوان. يرجى الانتظار ${ipCheck.retryAfterSeconds} ثانية.`,
+      };
+    }
+  }
+
+  // Generate cryptographically secure 6-digit code (100000 to 999999)
+  const code = randomInt(100000, 1000000).toString();
   const codeHash = hashOtp(cleanPhone, code);
   const expiresAt = now + OTP_CONFIG.EXPIRY_MS;
 
@@ -94,7 +211,7 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
     try {
       const supabase = createAdminClient();
 
-      // Check existing record for rate-limiting
+      // Check existing record for rate-limiting & cumulative attempts
       const { data: existing, error: fetchErr } = await (supabase as any)
         .from('otp_verifications')
         .select('*')
@@ -107,6 +224,7 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
 
       let hourlyCount = 1;
       let windowStart = new Date(now).toISOString();
+      let retainedAttempts = 0;
 
       if (existing) {
         // Enforce cooldown (60 seconds)
@@ -121,28 +239,39 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
           };
         }
 
-        // Enforce hourly limit
+        // Check cumulative hourly window
         const existingWinStart = new Date(existing.window_start).getTime();
         if (now - existingWinStart < OTP_CONFIG.HOURLY_WINDOW_MS) {
+          // If phone is already locked out by brute-force within this hour, deny new code
+          if ((existing.attempts || 0) >= OTP_CONFIG.MAX_ATTEMPTS) {
+            return {
+              success: false,
+              error: 'تم إيقاف طلب رموز التحقق مؤقتاً لهذا الرقم بسبب استنفاد محاولات الدخول الخاطئة. يرجى المحاولة لاحقاً.',
+            };
+          }
+
           if (existing.hourly_request_count >= OTP_CONFIG.MAX_HOURLY_REQUESTS) {
             return {
               success: false,
               error: 'تم تجاوز الحد الأقصى لطلبات التحقق لهذا الرقم خلال هذه الساعة. يرجى المحاولة لاحقاً.',
             };
           }
+
           hourlyCount = (existing.hourly_request_count || 0) + 1;
           windowStart = existing.window_start;
+          // Retain cumulative failed attempts within the window so requesting a new code doesn't reset brute-force counter
+          retainedAttempts = existing.attempts || 0;
         }
       }
 
-      // Upsert record with hashed code into public.otp_verifications
+      // Upsert record with HMAC-SHA256 into public.otp_verifications
       const { error: upsertErr } = await (supabase as any)
         .from('otp_verifications')
         .upsert(
           {
             phone: cleanPhone,
             code_hash: codeHash,
-            attempts: 0,
+            attempts: retainedAttempts,
             expires_at: new Date(expiresAt).toISOString(),
             last_requested_at: new Date(now).toISOString(),
             hourly_request_count: hourlyCount,
@@ -162,7 +291,8 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
       return {
         success: true,
         expiresAt,
-        demoNotice: !isProduction ? `لأغراض العرض والتجربة السريعة، رمز التحقق هو: ${code}` : undefined,
+        // demoNotice is defined ONLY when NODE_ENV === 'development'
+        demoNotice: isStrictDev ? `لأغراض التطوير المحلي، رمز التحقق هو: ${code}` : undefined,
       };
     } catch (err) {
       console.error('Supabase OTP generation exception');
@@ -196,9 +326,19 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
 
     let memHourly = existingMem.hourlyRequestCount;
     let memWinStart = existingMem.windowStart;
+    let retainedAttempts = existingMem.attempts;
+
     if (now - memWinStart > OTP_CONFIG.HOURLY_WINDOW_MS) {
       memHourly = 0;
       memWinStart = now;
+      retainedAttempts = 0;
+    } else {
+      if (existingMem.attempts >= OTP_CONFIG.MAX_ATTEMPTS) {
+        return {
+          success: false,
+          error: 'تم إيقاف طلب رموز التحقق مؤقتاً لهذا الرقم بسبب استنفاد محاولات الدخول الخاطئة. يرجى المحاولة لاحقاً.',
+        };
+      }
     }
 
     if (memHourly >= OTP_CONFIG.MAX_HOURLY_REQUESTS) {
@@ -211,7 +351,7 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
     memoryOtpStore.set(cleanPhone, {
       codeHash,
       expiresAt,
-      attempts: 0,
+      attempts: retainedAttempts,
       lastRequestedAt: now,
       hourlyRequestCount: memHourly + 1,
       windowStart: memWinStart,
@@ -230,23 +370,23 @@ export async function generateOtp(phone: string): Promise<GenerateOtpResult> {
   return {
     success: true,
     expiresAt,
-    demoNotice: !isProduction ? `لأغراض العرض والتجربة السريعة، رمز التحقق هو: ${code}` : undefined,
+    demoNotice: isStrictDev ? `لأغراض التطوير المحلي، رمز التحقق هو: ${code}` : undefined,
   };
 }
 
 /**
- * Verify a submitted OTP code.
+ * Verify a submitted 6-digit OTP code.
  * Enforces server-side expiration, brute-force attempt limits, and single-use replay protection.
- * In production, the development bypass code is strictly rejected.
+ * Strict: dev bypass code is allowed ONLY when process.env.NODE_ENV === 'development'.
  */
 export async function verifyOtp(phone: string, inputCode: string): Promise<VerifyOtpResult> {
   const cleanPhone = phone.trim();
   const cleanCode = (inputCode || '').trim();
   const now = Date.now();
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isStrictDev = process.env.NODE_ENV === 'development';
 
-  if (!cleanCode) {
-    return { valid: false, error: 'يرجى إدخال رمز التحقق المكون من 4 أرقام.' };
+  if (!cleanCode || cleanCode.length !== OTP_CONFIG.CODE_LENGTH) {
+    return { valid: false, error: 'يرجى إدخال رمز التحقق المكون من 6 أرقام.' };
   }
 
   // 1. Production / Persistent Path via Supabase
@@ -277,10 +417,10 @@ export async function verifyOtp(phone: string, inputCode: string): Promise<Verif
         return { valid: false, error: 'تم تجاوز الحد الأقصى للمحاولات الخاطئة. تم إلغاء الرمز لأسباب أمنية.' };
       }
 
-      // Compare hashes (constant-time check)
+      // Timing-safe HMAC comparison
       const inputHash = hashOtp(cleanPhone, cleanCode);
-      const isCodeCorrect = entry.code_hash === inputHash;
-      const isDevBypass = !isProduction && cleanCode === OTP_CONFIG.DEV_BYPASS_CODE;
+      const isCodeCorrect = constantTimeHashCompare(entry.code_hash, inputHash);
+      const isDevBypass = isStrictDev && cleanCode === OTP_CONFIG.DEV_BYPASS_CODE;
 
       if (isCodeCorrect || isDevBypass) {
         // Successful verification - immediately delete to prevent replay attacks
@@ -339,8 +479,8 @@ export async function verifyOtp(phone: string, inputCode: string): Promise<Verif
   entry.attempts++;
 
   const inputHash = hashOtp(cleanPhone, cleanCode);
-  const isCodeCorrect = entry.codeHash === inputHash;
-  const isDevBypass = !isProduction && cleanCode === OTP_CONFIG.DEV_BYPASS_CODE;
+  const isCodeCorrect = constantTimeHashCompare(entry.codeHash, inputHash);
+  const isDevBypass = isStrictDev && cleanCode === OTP_CONFIG.DEV_BYPASS_CODE;
 
   if (isCodeCorrect || isDevBypass) {
     memoryOtpStore.delete(cleanPhone);
@@ -365,4 +505,5 @@ export async function verifyOtp(phone: string, inputCode: string): Promise<Verif
  */
 export function _resetOtpStoreForTesting(): void {
   memoryOtpStore.clear();
+  memoryIpStore.clear();
 }

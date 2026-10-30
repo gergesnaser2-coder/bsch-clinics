@@ -7,19 +7,50 @@
 -- This migration non-destructively builds upon the existing 6 core tables:
 -- (clinics, clinic_schedules, appointments, appointment_status_history, staff_profiles, audit_logs)
 --
--- Deliverables included:
--- 1. Presentation & Instruction column extensions on `public.clinics` (Non-destructive).
--- 2. `public.website_settings` (Global identity, contacts, notice bar, SEO).
--- 3. `public.homepage_sections` (Dynamic homepage sections and content cards).
--- 4. `public.navigation_items` (Header and Footer navigation links).
--- 5. `public.media_assets` (Persistent media metadata registry for uploaded & static assets).
--- 6. Storage bucket `public-cms-assets` with public read and authenticated Admin upload policies.
--- 7. Seed data for settings, sections, navigation items, media assets, clinic presentation & instructions.
+-- Security & Data Safety Hardenings:
+-- 1. Idempotent dependency definitions (staff_role enum, handle_updated_at, get_current_staff_role).
+-- 2. Added UNIQUE constraint (location, href) on `public.navigation_items` to avoid duplicate rows.
+-- 3. Removed 'image/svg+xml' from storage bucket allowed mime types to eliminate stored XSS risk.
+-- 4. Replaced deceptive footer status badge with neutral non-operational default string.
+-- 5. Presentation updates report affected row counts via RAISE NOTICE.
+-- 6. Medical preparation instructions moved to standalone DRAFT seed file for clinical physician review.
 -- ========================================================================
 
 -- Enable core extensions safely
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ------------------------------------------------------------------------
+-- 0. Dependency Definitions (Guaranteed to exist idempotently)
+-- ------------------------------------------------------------------------
+DO $$ BEGIN
+  CREATE TYPE staff_role AS ENUM ('ADMIN', 'RECEPTIONIST', 'DOCTOR');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  NEW.updated_at = timezone('utc'::text, now());
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_current_staff_role()
+RETURNS staff_role
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT role FROM public.staff_profiles
+  WHERE id = auth.uid() AND is_active = true
+  LIMIT 1;
+$$;
 
 -- ------------------------------------------------------------------------
 -- 1. Extend Clinics Table with Presentation & Instruction Attributes Safely
@@ -32,7 +63,7 @@ ALTER TABLE public.clinics
   ADD COLUMN IF NOT EXISTS icon_name VARCHAR(50) DEFAULT 'Stethoscope',
   ADD COLUMN IF NOT EXISTS instructions TEXT;
 
-COMMENT ON COLUMN public.clinics.instructions IS 'Medical preparation instructions, fasting rules, and required documents shown to patients upon booking.';
+COMMENT ON COLUMN public.clinics.instructions IS 'Medical preparation instructions, documents, and attendance guidelines shown to patients upon booking.';
 
 -- ------------------------------------------------------------------------
 -- 2. Website Settings Table (إعدادات وهوية الموقع العامة)
@@ -66,7 +97,7 @@ CREATE TABLE IF NOT EXISTS public.website_settings (
   }'::jsonb,
   footer_summary TEXT NOT NULL DEFAULT 'خدمة حكومية متخصصة لتقديم الرعاية الطبية الفائقة لأطفال محافظة البحيرة، من خلال نخبة من أطباء واستشاريي الأطفال في شتى التخصصات الدقيقة.',
   footer_copyright TEXT NOT NULL DEFAULT 'مستشفى الأطفال التخصصي بالبحيرة. جميع الحقوق محفوظة.',
-  footer_status_badge TEXT NOT NULL DEFAULT 'نظام إدارة العيادات الخارجية الموحد — متاح ويعمل بكفاءة 🟢',
+  footer_status_badge TEXT NOT NULL DEFAULT 'المنظومة الإلكترونية للعيادات الخارجية — مستشفى الأطفال التخصصي',
   is_published BOOLEAN NOT NULL DEFAULT true,
   published_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
@@ -98,10 +129,11 @@ CREATE TABLE IF NOT EXISTS public.navigation_items (
   display_order INTEGER NOT NULL DEFAULT 0,
   is_visible BOOLEAN NOT NULL DEFAULT true,
   is_external BOOLEAN NOT NULL DEFAULT false,
-  location VARCHAR(30) NOT NULL DEFAULT 'HEADER', -- 'HEADER', 'FOOTER_QUICK', 'FOOTER_LEGAL'
+  location VARCHAR(30) NOT NULL DEFAULT 'HEADER',
   icon_name VARCHAR(50) DEFAULT 'Link',
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  CONSTRAINT uq_navigation_location_href UNIQUE (location, href)
 );
 
 -- ------------------------------------------------------------------------
@@ -126,7 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_created_at ON public.media_assets (c
 CREATE INDEX IF NOT EXISTS idx_media_assets_is_custom ON public.media_assets (is_custom);
 
 -- ------------------------------------------------------------------------
--- 5.1 OTP Verifications Table (للتشغيل الآمن في بيئات Serverless/الموزعة)
+-- 5.1 OTP Verifications Table (تخزين آمن لرموز التحقق المشفرة)
 -- ------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.otp_verifications (
   phone TEXT PRIMARY KEY,
@@ -140,7 +172,7 @@ CREATE TABLE IF NOT EXISTS public.otp_verifications (
 );
 
 ALTER TABLE public.otp_verifications ENABLE ROW LEVEL SECURITY;
--- No public policies created: table is strictly managed by backend service role.
+-- No public policies: strictly accessed by service-role backend.
 
 -- ------------------------------------------------------------------------
 -- 6. Updated At Triggers for CMS Tables
@@ -234,7 +266,7 @@ CREATE POLICY "Admin can manage media assets"
   WITH CHECK (public.get_current_staff_role() = 'ADMIN');
 
 -- ------------------------------------------------------------------------
--- 8. Supabase Storage Bucket for CMS Assets
+-- 8. Supabase Storage Bucket for CMS Assets (SVG removed for XSS prevention)
 -- ------------------------------------------------------------------------
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
@@ -242,21 +274,19 @@ VALUES (
   'public-cms-assets',
   true,
   5242880, -- 5 MB limit
-  ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon']
+  ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon']
 )
 ON CONFLICT (id) DO UPDATE SET
   public = true,
   file_size_limit = 5242880,
-  allowed_mime_types = ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon'];
+  allowed_mime_types = ARRAY['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon'];
 
--- Storage RLS: Public can view assets
 DROP POLICY IF EXISTS "Public Access to CMS Assets" ON storage.objects;
 CREATE POLICY "Public Access to CMS Assets"
   ON storage.objects FOR SELECT
   TO anon, authenticated
   USING (bucket_id = 'public-cms-assets');
 
--- Storage RLS: Authenticated Admin can upload / update / delete assets
 DROP POLICY IF EXISTS "Admin can upload CMS Assets" ON storage.objects;
 CREATE POLICY "Admin can upload CMS Assets"
   ON storage.objects FOR INSERT
@@ -288,7 +318,7 @@ CREATE POLICY "Admin can delete CMS Assets"
 -- 9. Seed Initial CMS Data Idempotently
 -- ------------------------------------------------------------------------
 
--- 9.1 Default Website Settings
+-- 9.1 Default Website Settings (Neutral status badge)
 INSERT INTO public.website_settings (
   id,
   site_name,
@@ -321,17 +351,29 @@ VALUES (
   'منصة حجز المواعيد والاستعلام للعيادات الخارجية بمستشفى الأطفال التخصصي بالبحيرة — احجز موعدك بالاسم ورقم الهاتف فقط وتابع حالة حجزك وتعليمات الحضور.',
   'خدمة حكومية متخصصة لتقديم الرعاية الطبية الفائقة لأطفال محافظة البحيرة، من خلال نخبة من أطباء واستشاريي الأطفال في شتى التخصصات الدقيقة.',
   'مستشفى الأطفال التخصصي بالبحيرة. جميع الحقوق محفوظة.',
-  'نظام إدارة العيادات الخارجية الموحد — متاح ويعمل بكفاءة 🟢'
+  'المنظومة الإلكترونية للعيادات الخارجية — مستشفى الأطفال التخصصي'
 )
 ON CONFLICT (id) DO NOTHING;
 
--- 9.2 Navigation Items
+-- 9.2 Navigation Items (Guarded by uq_navigation_location_href)
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint 
+    WHERE conname = 'uq_navigation_location_href'
+  ) THEN
+    ALTER TABLE public.navigation_items
+      ADD CONSTRAINT uq_navigation_location_href UNIQUE (location, href);
+  END IF;
+EXCEPTION
+  WHEN duplicate_table OR duplicate_object THEN null;
+END $$;
+
 INSERT INTO public.navigation_items (label, href, display_order, is_visible, is_external, location, icon_name)
 VALUES
   ('الرئيسية', '/', 1, true, false, 'HEADER', 'Home'),
   ('حجز موعد', '/appointments/new', 2, true, false, 'HEADER', 'CalendarPlus'),
   ('متابعة حجز', '/appointments/track', 3, true, false, 'HEADER', 'Search')
-ON CONFLICT DO NOTHING;
+ON CONFLICT (location, href) DO NOTHING;
 
 -- 9.3 Homepage Sections
 INSERT INTO public.homepage_sections (id, display_order, is_visible, title, subtitle, badge_text, content)
@@ -524,79 +566,43 @@ VALUES
   ('asset-3', 'أيقونة المتصفح الافتراضية', '/favicon.ico', 'image/x-icon', 4286, false)
 ON CONFLICT (id) DO NOTHING;
 
--- 9.5 Clinic Presentation Attributes
-UPDATE public.clinics SET english_title = 'Pediatric Cardiology', accent_color = '#DC2626', icon_name = 'HeartPulse', display_order = 1 WHERE id = 'cardio';
-UPDATE public.clinics SET english_title = 'Echocardiography Unit', accent_color = '#0284C7', icon_name = 'Activity', display_order = 2 WHERE id = 'echo';
-UPDATE public.clinics SET english_title = 'Pediatric Dentistry', accent_color = '#0D9488', icon_name = 'Smile', display_order = 3 WHERE id = 'dentistry';
-UPDATE public.clinics SET english_title = 'Pediatric Neurology', accent_color = '#7C3AED', icon_name = 'Brain', display_order = 4 WHERE id = 'neuro';
-UPDATE public.clinics SET english_title = 'Gastroenterology & Hepatology', accent_color = '#D97706', icon_name = 'Pill', display_order = 5 WHERE id = 'gi';
-UPDATE public.clinics SET english_title = 'Clinical Nutrition', accent_color = '#16A34A', icon_name = 'Baby', display_order = 6 WHERE id = 'nutrition';
-UPDATE public.clinics SET english_title = 'Audiology Clinic', accent_color = '#2563EB', icon_name = 'Ear', display_order = 7 WHERE id = 'audiology';
-UPDATE public.clinics SET english_title = 'Pediatric Surgery', accent_color = '#E11D48', icon_name = 'Scissors', display_order = 8 WHERE id = 'surgery';
+-- 9.5 Clinic Presentation Attributes (Safely reports affected row count)
+DO $$
+DECLARE
+  v_count INTEGER;
+BEGIN
+  UPDATE public.clinics SET english_title = 'Pediatric Cardiology', accent_color = '#DC2626', icon_name = 'HeartPulse', display_order = 1 WHERE id = 'cardio';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for cardio: % row(s) affected.', v_count;
 
--- 9.6 Dynamic Clinic Instructions & Required Documents
-UPDATE public.clinics
-SET instructions = CASE 
-  -- جراحة الأطفال
-  WHEN id = 'surgery' OR name ILIKE '%جراح%' THEN
-    '• صيام تام عن الطعام والشراب لمدة 4 إلى 6 ساعات قبل موعد الفحص في حال تقرير فحص جراحي.
-• إحضار أصل شهادة ميلاد الطفل وجميع الفحوصات والتحاليل وأشعة السونار السابقة إن وجدت.
-• ارتداء الطفل ملابس قطنية فضفاضة وسهلة الفتح لتيسير الفحص السريري الدقيق.'
+  UPDATE public.clinics SET english_title = 'Echocardiography Unit', accent_color = '#0284C7', icon_name = 'Activity', display_order = 2 WHERE id = 'echo';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for echo: % row(s) affected.', v_count;
 
-  -- قلب الأطفال
-  WHEN id = 'cardio' OR name ILIKE '%قلب%' THEN
-    '• إحضار رسم القلب (ECG) وتقارير الموجات فوق الصوتية (Echo) وفحوصات الدم السابقة إن وجدت.
-• تجنب تناول الطفل لأي مشروبات منبهة أو أدوية منشطة قبل الفحص دون استشارة الطبيب.
-• إحضار التاريخ المرضي الدوائي وقائمة العلاجات الحالية التي يتناولها الطفل بدقة.'
+  UPDATE public.clinics SET english_title = 'Pediatric Dentistry', accent_color = '#0D9488', icon_name = 'Smile', display_order = 3 WHERE id = 'dentistry';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for dentistry: % row(s) affected.', v_count;
 
-  -- موجات فوق صوتية على القلب (إيكو الأطفال)
-  WHEN id = 'echo' OR name ILIKE '%إيكو%' THEN
-    '• يُفضل حضور الطفل هادئاً وغير مجهد، والحرص على إطعامه قبل الفحص بنصف ساعة لتجنب البكاء أثناء التصوير.
-• إحضار التقارير والفحوصات القلبية السابقة لمقارنة النتائج وقياسات عضلة القلب.
-• ارتداء ملابس خفيفة يسهل كشفها من منطقة الصدر.'
+  UPDATE public.clinics SET english_title = 'Pediatric Neurology', accent_color = '#7C3AED', icon_name = 'Brain', display_order = 4 WHERE id = 'neuro';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for neuro: % row(s) affected.', v_count;
 
-  -- طب وجراحة أسنان الأطفال
-  WHEN id = 'dentistry' OR name ILIKE '%أسنان%' THEN
-    '• تنظيف أسنان الطفل بالفرشاة والمعجون جيداً قبل الحضور للعيادة.
-• تناول وجبة خفيفة قبل الموعد بساعتين وتجنب الأطعمة الدسمة أو السكريات الملتصقة.
-• إحضار أي أشعة بانوراما أو أشعة سينية موضعية سابقة للأسنان إن توفرت.'
+  UPDATE public.clinics SET english_title = 'Gastroenterology & Hepatology', accent_color = '#D97706', icon_name = 'Pill', display_order = 5 WHERE id = 'gi';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for gi: % row(s) affected.', v_count;
 
-  -- جهاز هضمي ومناظير أطفال
-  WHEN id = 'gi' OR name ILIKE '%هضم%' THEN
-    '• يفضل صيام الطفل ساعتين إلى 4 ساعات قبل موعد الفحص السريري وسونار البطن إن طلب.
-• إحضار سجل التاريخ الغذائي وملاحظات الحساسية أو الإسهال/القيء وأي تحاليل براز سابقة.
-• إحضار كافة الأدوية الحالية للمعدة أو الفيتامينات لفحصها من قبل الاستشاري.'
+  UPDATE public.clinics SET english_title = 'Clinical Nutrition', accent_color = '#16A34A', icon_name = 'Baby', display_order = 6 WHERE id = 'nutrition';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for nutrition: % row(s) affected.', v_count;
 
-  -- مخ وأعصاب أطفال
-  WHEN id = 'neuro' OR name ILIKE '%أعصاب%' OR name ILIKE '%نفسي%' THEN
-    '• إحضار أي تسجيلات فيديو لنوبات الحركة غير الطبيعية أو التشنجات إن كانت متوفرة على الهاتف.
-• إحضار أصل رسم المخ (EEG) والرنين المغناطيسي (MRI) والأشعة المقطعية السابقة.
-• الحرص على نوم الطفل وقتاً كافياً ليلة الفحص وعدم إيقافه المفاجئ لأدوية الصرع أو الأعصاب.'
+  UPDATE public.clinics SET english_title = 'Audiology Clinic', accent_color = '#2563EB', icon_name = 'Ear', display_order = 7 WHERE id = 'audiology';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for audiology: % row(s) affected.', v_count;
 
-  -- سمعيات واتزان وتخاطب
-  WHEN id = 'audiology' OR name ILIKE '%سمع%' THEN
-    '• تنظيف الأذن جيداً والتأكد من عدم وجود التهاب حاد أو إفرازات صديدية ظاهرة قبل الفحص.
-• في حالة قياس السمع بالكمبيوتر (ABR) للرضع، يجب نوم الطفل نوماً عميقاً وطبيعياً أثناء الاختبار.
-• إحضار نتائج اختبار المسح السمعي لحديثي الولادة وشهادة الميلاد.'
+  UPDATE public.clinics SET english_title = 'Pediatric Surgery', accent_color = '#E11D48', icon_name = 'Scissors', display_order = 8 WHERE id = 'surgery';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RAISE NOTICE 'Updated presentation attributes for surgery: % row(s) affected.', v_count;
+END $$;
 
-  -- عيادة التغذية العلاجية
-  WHEN id = 'nutrition' OR name ILIKE '%تغذي%' THEN
-    '• إحضار جدول تفصيلي بالأطعمة والمشروبات التي تناولها الطفل على مدار الأيام الثلاثة السابقة.
-• إحضار منحنى النمو السابق للطفل ودفتر التطعيمات الموثق به الوزن والطول منذ الولادة.
-• إحضار أحدث تحاليل صورة الدم الكاملة (CBC) ونسبة الحديد وفيتامين د.'
-
-  -- عيادة الغدد الصماء والنمو
-  WHEN id = 'growth' OR name ILIKE '%غدد%' OR name ILIKE '%نمو%' THEN
-    '• إحضار دفتر التطعيمات وشهادة الميلاد الأصلية لحساب دقيق للعمر الزمني ومنحنيات النمو.
-• إحضار أشعة عمر العظام (أشعة عادية على الرسغ الأيسر) وأي تحاليل هرمونية سابقة (هرمون النمو والغدة الدرقية).
-• الحضور صائماً من 8 إلى 10 ساعات في حال طلب سحب عينات هرمونية بالعيادة.'
-
-  -- عيادة التخاطب وتنمية المهارات
-  WHEN id = 'phonetics' OR name ILIKE '%تخاطب%' THEN
-    '• إحضار نتيجة فحص مقياس السمع وفحص الذكاء أو تقييم التوحد السابق إن وجد.
-• إحضار تقرير الحضّانة أو المدرسة حول سلوك الطفل وتفاعله الاجتماعي واللغوي.
-• حضور ولي الأمر الأكثر معايشة للطفل لتقديم تقرير دقيق عن مفرداته وسلوكه اليومي.'
-
-  ELSE instructions
-END;
-
+-- NOTE: Medical preparation instructions have been intentionally removed from this migration.
+-- They are provided in supabase/seed/clinic_instructions_DRAFT.sql for physician clinical review.

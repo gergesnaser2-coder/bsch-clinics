@@ -28,7 +28,7 @@ test('Persistence Test 1: Booking failure in Supabase NEVER returns a false succ
       phoneNumber: '01012345678',
       patientAge: '5 سنوات',
       patientAddress: 'أبو حمص - دمسنا - البحيرة',
-      appointmentDate: '2026-11-20',
+      appointmentDate: '2026-11-21',
     });
 
     assert.equal(result.success, false, 'createAppointment must return success=false on DB failure');

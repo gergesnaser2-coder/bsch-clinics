@@ -1,6 +1,27 @@
 import type { AppointmentStatus } from '../types/index.ts';
 
 /**
+ * Redacts a child's name for privacy in public tracking (e.g. "أحمد كريم محمود" -> "أحمد ك*** م***").
+ * Keeps the first name visible for the guardian's confirmation while masking patronymic names.
+ */
+export function maskPatientName(name?: string | null): string {
+  if (!name || typeof name !== 'string') return '';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '';
+  if (parts.length === 1) {
+    const single = parts[0];
+    return single.length <= 2 ? single : single.slice(0, 2) + '***';
+  }
+  return parts
+    .map((part, index) => {
+      if (index === 0) return part;
+      const firstChar = part.charAt(0);
+      return `${firstChar}***`;
+    })
+    .join(' ');
+}
+
+/**
  * Validates Egyptian mobile phone numbers.
  * Must start with 010, 011, 012, or 015 and have exactly 11 digits.
  * Converts Arabic numerals (٠-٩) to standard digits.
@@ -104,9 +125,26 @@ export function canTransitionStatus(
 }
 
 /**
+ * Canonical normalization for patient name identity checks.
+ * Trims leading/trailing whitespace, collapses internal whitespace to a single space, and lowercases.
+ * Must match PostgreSQL: lower(regexp_replace(trim(patient_name), '\s+', ' ', 'g'))
+ */
+export function normalizePatientName(name?: string | null): string {
+  if (!name || typeof name !== 'string') return '';
+  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
  * Generates an appointment reference code (e.g. BSCH-4819).
+ * Uses CSPRNG (Web Crypto API) across server and client to minimize collision risk.
  */
 export function generateReferenceNumber(): string {
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    const array = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(array);
+    const digits = 1000 + (array[0] % 9000);
+    return `BSCH-${digits}`;
+  }
   const digits = Math.floor(1000 + Math.random() * 9000);
   return `BSCH-${digits}`;
 }
@@ -167,13 +205,82 @@ export function getStatusDisplay(status: AppointmentStatus): {
 }
 
 /**
- * Formats a Date object to YYYY-MM-DD string in local time.
+ * Formats a Date object to YYYY-MM-DD.
  */
-export function formatLocalDate(d: Date = new Date()): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+export function formatLocalDate(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * Returns YYYY-MM-DD representing today in Africa/Cairo timezone.
+ */
+export function getTodayCairoDateString(now: Date = new Date()): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  return formatter.format(now);
+}
+
+/**
+ * Checks whether an arrival date (YYYY-MM-DD) is today or in the future according to Africa/Cairo timezone.
+ */
+export function isDateTodayOrFutureInCairo(dateStr: string, now: Date = new Date()): boolean {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const todayCairo = getTodayCairoDateString(now);
+  return dateStr >= todayCairo;
+}
+
+export type AgeUnit = 'يوم' | 'شهر' | 'سنة';
+
+/**
+ * Validates pediatric patient age per unit (days 0-30, months 1-36, years 1-18).
+ */
+export function validatePatientAge(
+  val: string | number,
+  unit: AgeUnit
+): { isValid: boolean; error?: string; formatted?: string } {
+  const num = typeof val === 'number' ? val : Number(val);
+  if (isNaN(num)) {
+    return { isValid: false, error: 'يرجى إدخال قيمة رقمية صحيحة لعمر الطفل' };
+  }
+
+  if (unit === 'يوم') {
+    if (num < 0 || num > 30) {
+      return { isValid: false, error: 'عمر الطفل بالأيام يجب أن يكون بين 0 و 30 يوماً' };
+    }
+  } else if (unit === 'شهر') {
+    if (num < 1 || num > 36) {
+      return { isValid: false, error: 'عمر الطفل بالشهور يجب أن يكون بين شهر و 36 شهراً' };
+    }
+  } else if (unit === 'سنة') {
+    if (num < 1 || num > 18) {
+      return { isValid: false, error: 'عمر الطفل بالسنوات في مستشفى الأطفال يجب أن يكون بين سنة و 18 سنة' };
+    }
+  } else {
+    return { isValid: false, error: 'وحدة العمر غير معتمدة' };
+  }
+
+  return { isValid: true, formatted: `${num} ${unit}` };
+}
+
+/**
+ * Validates Egyptian 14-digit Guardian National ID (optional field).
+ */
+export function validateGuardianNationalId(nid?: string | null): { isValid: boolean; error?: string } {
+  if (!nid || nid.trim() === '') {
+    return { isValid: true }; // Optional field
+  }
+  const clean = nid.trim().replace(/\s+/g, '');
+  if (!/^[0-9]{14}$/.test(clean)) {
+    return { isValid: false, error: 'الرقم القومي لولي الأمر يجب أن يتكون من 14 رقماً بالضبط' };
+  }
+  return { isValid: true };
 }
 
 /**

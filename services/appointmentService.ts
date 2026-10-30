@@ -1,5 +1,6 @@
-import type { Clinic, Appointment, AppointmentSlot, AppointmentStatus, CreateAppointmentInput, AuditLogItem, StaffUser } from '../types/index.ts';
-import { normalizeAndValidateEgyptianPhone, validatePatientName, generateReferenceNumber, canTransitionStatus, formatLocalDate } from '../lib/rules.ts';
+import type { Clinic, ClinicService, ClinicScheduleException, Appointment, AppointmentSlot, AppointmentStatus, CreateAppointmentInput, AuditLogItem, StaffUser } from '../types/index.ts';
+import { normalizeAndValidateEgyptianPhone, validatePatientName, generateReferenceNumber, canTransitionStatus, formatLocalDate, getTodayCairoDateString, validateGuardianNationalId, maskPatientName } from '../lib/rules.ts';
+import { generateBookingCode, hashBookingCode } from '../lib/trackingAccess.ts';
 import { createAdminClient, isSupabaseConfigured, isMockStoreAllowed } from '../lib/supabase/admin.ts';
 import type { Database } from '../types/database.types.ts';
 
@@ -15,7 +16,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6], // Sat to Thu
     maxDailySlots: 20,
     slotDurationMinutes: 30,
-    instructions: 'إحضار بطاقة التأمين الصحي وشهادة ميلاد الطفل. يُنصح بتناول وجبة خفيفة قبل الحضور بنصف ساعة وتنظيف الأسنان جيداً بالفرشاة والمعجون. يرجى تجنب إعطاء الطفل مسكنات قوية قبل موعد الكشف مباشرة.',
+    instructions: 'إحضار بطاقة التأمين الصحي وشهادة ميلاد الطفل. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالأدوية أو الصيام يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -28,7 +29,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 15,
     slotDurationMinutes: 30,
-    instructions: 'يلزم إحضار تقرير الطبيب المعالج، وفحوصات الموجات الصوتية السابقة على القلب. يُفضل أن يكون الطفل في حالة شبع وهدوء أو وقت قيلولة لضمان دقة وسرعة تصوير عضلة وصمامات القلب بالموجات فوق الصوتية.',
+    instructions: 'يلزم إحضار تقرير الطبيب المعالج، وفحوصات الموجات الصوتية السابقة على القلب. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالأدوية أو الفحص يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -41,7 +42,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 20,
     slotDurationMinutes: 30,
-    instructions: 'إحضار بطاقة التطعيمات ودفتر متابعة نمو الطفل منذ الولادة. يُفضل تدوين جدول غذائي مفصل بما تناوله الطفل خلال الـ 3 أيام الماضية، مع إحضار تحاليل صورة الدم الشاملة ومستوى الحديد والكالسيوم وفيتامين د إن وُجدت.',
+    instructions: 'إحضار بطاقة التطعيمات ودفتر متابعة نمو الطفل منذ الولادة مع الفحوصات والتحاليل السابقة إن وُجدت. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالحمية الغذائية أو التحاليل يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -54,7 +55,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 20,
     slotDurationMinutes: 30,
-    instructions: 'إحضار التحاليل المعملية السابقة (وظائف كبد، حساسية القمح، صورة دم)، وأشعة السونار على البطن والحوض. يُفضل صيام الطفل ساعتين قبل الكشف لإمكانية إجراء الفحص السريري الدقيق للبطن والجهاز الهضمي.',
+    instructions: 'إحضار التحاليل المعملية السابقة وأشعة السونار إن وُجدت. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى لإنهاء التسجيل. التعليمات الطبية الخاصة بالصيام أو الأدوية يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -67,7 +68,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 15,
     slotDurationMinutes: 30,
-    instructions: 'يشترط لإجراء فحص السمع الدقيق وضغط الأذن أن تكون أذن الطفل نظيفة وخالية من الشمع أو الالتهابات الحادة، وأن يكون الرضيع أو الطفل في حالة نوم عميق أو هدوء تام أثناء إجراء اختبار استجابة جذع المخ (ABR).',
+    instructions: 'إحضار بطاقة التأمين الصحي وشهادة ميلاد الطفل وأي فحوصات سمعية سابقة. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالتحضير للفحص يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -80,7 +81,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 15,
     slotDurationMinutes: 30,
-    instructions: 'إحضار أصل رسم المخ الكهربائي (EEG)، أو أشعة الرنين المغناطيسي (MRI)، أو الأشعة المقطعية الحديثة. يُرجى تدوين مواعيد وجرعات أدوية التشنجات والصرع، وتوثيق نوبات التشنج بمقطع فيديو بالهاتف إن أمكن.',
+    instructions: 'إحضار أصل رسم المخ الكهربائي أو الأشعة السابقة إن وُجدت. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالأدوية يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -93,7 +94,7 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 18,
     slotDurationMinutes: 30,
-    instructions: 'يرجى مراجعة غرفة العلامات الحيوية لقياس النبض وضغط الدم أولاً. يلزم إحضار رسم القلب (ECG)، أو تقارير الإيكو وأشعة الصدر السابقة إن وُجدت، مع قائمة بجميع أدوية القلب التي يتناولها الطفل بانتظام.',
+    instructions: 'يرجى مراجعة غرفة العلامات الحيوية لقياس النبض والضغط أولاً، وإحضار الفحوصات والتقارير السابقة. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالأدوية يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
@@ -106,15 +107,108 @@ const INITIAL_CLINICS: Clinic[] = [
     daysOfWeek: [0, 1, 2, 3, 4, 6],
     maxDailySlots: 20,
     slotDurationMinutes: 30,
-    instructions: 'الحضور صائماً لمدة لا تقل عن 4 إلى 6 ساعات للحالات التي تقرر لها فحص أو تدخل جراحي مجدول. يلزم إحضار التحاليل المعملية (صورة دم كاملة CBC، زمن النزف والتجلط PT/PC)، وتقارير أشعة السونار الخاصة بالحالة.',
+    instructions: 'إحضار التحاليل المعملية وتقارير أشعة السونار الخاصة بالحالة إن وُجدت. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الطبية الخاصة بالصيام أو التحضير الجراحي يحددها الطبيب المعالج فقط.',
     isActive: true,
     isHospitalConfirmed: false,
   },
 ];
 
 function getTodayDateString(): string {
-  return formatLocalDate();
+  return getTodayCairoDateString();
 }
+
+const INITIAL_SERVICES: ClinicService[] = [
+  {
+    id: 'srv_dent_exam',
+    clinicId: 'dentistry',
+    name: 'كشف وتشخيص أسنان الأطفال',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي', 'أي أشعة سينية أو بانوراما سابقة للأسنان إن وجدت'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. يرجى تنظيف أسنان وفم الطفل بالفرشاة والمعجون جيداً قبل الحضور. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_dent_pulp',
+    clinicId: 'dentistry',
+    name: 'علاج العصب والحشو الوقائي للأطفال',
+    requiredDocuments: ['شهادة ميلاد الطفل', 'الأشعة السابقة وفحوصات الأسنان'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى لإنهاء تسجيل التذكرة. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 2,
+  },
+  {
+    id: 'srv_echo_standard',
+    clinicId: 'echo',
+    name: 'فحص موجات فوق صوتية على قلب الأطفال (إيكو)',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل', 'تقرير الطبيب المعالج المحول للفحص', 'أي فحوصات أو تقارير إيكو سابقة'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. ارتداء ملابس خفيفة يسهل فتحها من منطقة الصدر لتيسير التصوير. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى مع الحرص على هدوء الطفل. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_cardio_exam',
+    clinicId: 'cardio',
+    name: 'مناظرة وكشف قلب الأطفال والعيوب الخلقية',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل', 'رسم قلب (ECG) حديث إن وجد', 'تقارير الإيكو والفحوصات القلبية السابقة'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. قياس العلامات الحيوية بغرفة الفحص الأولي أولاً. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_surg_consult',
+    clinicId: 'surgery',
+    name: 'مناظرة وتقييم جراحة الأطفال العامة',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل ودفتر التطعيمات', 'فحوصات السونار والتحاليل المعملية السابقة'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. ارتداء ملابس فضفاضة لتسهيل الفحص السريري. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_surg_hernia',
+    clinicId: 'surgery',
+    name: 'متابعة حالات الفتق والخصية المعلقة وجراحات البطن',
+    requiredDocuments: ['شهادة ميلاد الطفل', 'تقارير السونار والعمليات الجراحية السابقة إن وجدت'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 2,
+  },
+  {
+    id: 'srv_gi_consult',
+    clinicId: 'gi',
+    name: 'كشف أمراض الجهاز الهضمي والكبد وسوء الامتصاص',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل', 'تحاليل الدم ووظائف الكبد السابقة', 'تقارير سونار البطن إن وجدت'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_neuro_consult',
+    clinicId: 'neuro',
+    name: 'كشف المخ والأعصاب ومتابعة التشنجات والصرع',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل ودفتر التطعيمات', 'أصل رسم المخ (EEG) وصور الرنين المغناطيسي (MRI) إن وجدت'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. إحضار أي مقاطع فيديو موثقة للحركات غير الطبيعية بالهاتف. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_audio_abr',
+    clinicId: 'audiology',
+    name: 'فحص وقياس استجابة السمع بجذع المخ (ABR)',
+    requiredDocuments: ['أصل شهادة ميلاد الطفل', 'نتائج فحص المسح السمعي لحديثي الولادة'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. التأكد من نظافة أذن الطفل التامة قبل الفحص. في قياس ABR يفضل أن يكون الرضيع في نوم عميق. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+  {
+    id: 'srv_nutr_assess',
+    clinicId: 'nutrition',
+    name: 'تقييم التغذية العلاجية ومتابعة النمو وحساسية الطعام',
+    requiredDocuments: ['شهادة ميلاد الطفل ودفتر التطعيمات الموثق به الوزن والطول منذ الولادة', 'تحاليل صورة الدم الشاملة وفيتامين د إن وجدت'],
+    instructions: 'DRAFT — requires approval from the hospital\'s physicians. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى لتسجيل القياسات الحيوية. التعليمات الخاصة بالصيام أو الأدوية تُحدد من الطبيب المعالج، يرجى الاتصال بالمستشفى للتأكد قبل الحضور.',
+    isActive: true,
+    displayOrder: 1,
+  },
+];
 
 const INITIAL_APPOINTMENTS: Appointment[] = [
   {
@@ -228,8 +322,10 @@ const INITIAL_AUDIT_LOGS: AuditLogItem[] = [
 
 class AppointmentServiceStore {
   private clinics: Clinic[] = [...INITIAL_CLINICS];
+  private services: ClinicService[] = [...INITIAL_SERVICES];
   private appointments: Appointment[] = [...INITIAL_APPOINTMENTS];
   private auditLogs: AuditLogItem[] = [...INITIAL_AUDIT_LOGS];
+  private schedules: ClinicScheduleException[] = [];
 
   public addAuditLog(staffName: string, staffRole: string, action: string, details: string, referenceNumber?: string) {
     const item: AuditLogItem = {
@@ -267,14 +363,207 @@ class AppointmentServiceStore {
     return this.auditLogs.slice(0, 100);
   }
 
+  public async getClinicServices(clinicId?: string): Promise<ClinicService[]> {
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        let query = (supabase as any).from('clinic_services').select('*').eq('is_active', true);
+        if (clinicId) {
+          query = query.eq('clinic_id', clinicId);
+        }
+        query = query.order('display_order', { ascending: true });
+        const { data, error } = await query;
+        if (!error && data && data.length > 0) {
+          return data.map((s: any) => ({
+            id: s.id,
+            clinicId: s.clinic_id,
+            name: s.name,
+            requiredDocuments: s.required_documents || [],
+            instructions: s.instructions || '',
+            maxDailyCapacity: s.max_daily_capacity !== null && s.max_daily_capacity !== undefined ? Number(s.max_daily_capacity) : undefined,
+            isActive: s.is_active,
+            displayOrder: s.display_order,
+            createdAt: s.created_at,
+            updatedAt: s.updated_at,
+          }));
+        }
+      } catch (err) {
+        console.warn('Supabase fetch clinic_services fallback to local store:', err);
+      }
+    }
+
+    let list = this.services.filter((s) => s.isActive);
+    if (clinicId) {
+      list = list.filter((s) => s.clinicId === clinicId);
+    }
+    return list.sort((a, b) => a.displayOrder - b.displayOrder);
+  }
+
+  public async createClinicService(
+    clinicId: string,
+    input: Partial<ClinicService>,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; service?: ClinicService; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'إضافة الخدمات يتطلب صلاحية مدير النظام' };
+    }
+    if (!input.name || input.name.trim().length === 0) {
+      return { success: false, error: 'اسم الخدمة مطلوب' };
+    }
+
+    const newService: ClinicService = {
+      id: input.id || `srv_${clinicId}_${Date.now()}`,
+      clinicId,
+      name: input.name.trim(),
+      requiredDocuments: input.requiredDocuments || [
+        'أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي',
+        'أي تقارير طبية أو فحوصات سابقة تخص الحالة',
+      ],
+      instructions: input.instructions?.trim() || 'الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى.',
+      maxDailyCapacity: input.maxDailyCapacity !== undefined && input.maxDailyCapacity !== null ? Number(input.maxDailyCapacity) : undefined,
+      isActive: input.isActive ?? true,
+      displayOrder: input.displayOrder ?? (this.services.length + 1),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await (supabase as any).from('clinic_services').insert({
+          id: newService.id,
+          clinic_id: newService.clinicId,
+          name: newService.name,
+          required_documents: newService.requiredDocuments,
+          instructions: newService.instructions,
+          max_daily_capacity: newService.maxDailyCapacity ?? null,
+          is_active: newService.isActive,
+          display_order: newService.displayOrder,
+        });
+        if (error) {
+          return { success: false, error: 'تعذر حفظ الخدمة في قاعدة البيانات.' };
+        }
+      } catch {
+        return { success: false, error: 'خطأ اتصال بقاعدة البيانات' };
+      }
+    }
+
+    this.services.push(newService);
+    return { success: true, service: newService };
+  }
+
+  public async updateClinicService(
+    clinicId: string,
+    serviceId: string,
+    updates: Partial<ClinicService>,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; service?: ClinicService; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'تعديل الخدمات يتطلب صلاحية مدير النظام' };
+    }
+
+    const service = this.services.find((s) => s.id === serviceId && s.clinicId === clinicId);
+    if (!service) {
+      return { success: false, error: 'الخدمة غير موجودة' };
+    }
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await (supabase as any)
+          .from('clinic_services')
+          .update({
+            name: updates.name ?? service.name,
+            required_documents: updates.requiredDocuments ?? service.requiredDocuments,
+            instructions: updates.instructions ?? service.instructions,
+            max_daily_capacity: updates.maxDailyCapacity !== undefined ? (updates.maxDailyCapacity ? Number(updates.maxDailyCapacity) : null) : (service.maxDailyCapacity ?? null),
+            is_active: updates.isActive ?? service.isActive,
+            display_order: updates.displayOrder ?? service.displayOrder,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', serviceId);
+        if (error) {
+          return { success: false, error: 'تعذر تعديل الخدمة في قاعدة البيانات.' };
+        }
+      } catch {
+        return { success: false, error: 'خطأ اتصال بقاعدة البيانات' };
+      }
+    }
+
+    if (updates.name !== undefined) service.name = updates.name;
+    if (updates.requiredDocuments !== undefined) service.requiredDocuments = updates.requiredDocuments;
+    if (updates.instructions !== undefined) service.instructions = updates.instructions;
+    if (updates.maxDailyCapacity !== undefined) {
+      service.maxDailyCapacity = updates.maxDailyCapacity ? Number(updates.maxDailyCapacity) : undefined;
+    }
+    if (updates.isActive !== undefined) service.isActive = updates.isActive;
+    if (updates.displayOrder !== undefined) service.displayOrder = updates.displayOrder;
+    service.updatedAt = new Date().toISOString();
+
+    return { success: true, service };
+  }
+
+  public async deleteClinicService(
+    clinicId: string,
+    serviceId: string,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; deactivated?: boolean; message?: string; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'حذف الخدمات يتطلب صلاحية مدير النظام' };
+    }
+    const service = this.services.find((s) => s.id === serviceId && s.clinicId === clinicId);
+    if (!service) {
+      return { success: false, error: 'الخدمة غير موجودة' };
+    }
+
+    let hasAppointments = false;
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { count } = await (supabase as any)
+          .from('appointments')
+          .select('id', { count: 'exact', head: true })
+          .eq('service_id', serviceId);
+        hasAppointments = (count || 0) > 0;
+      } catch (err) {
+        console.warn('Check service appointments error:', err);
+      }
+    } else {
+      hasAppointments = this.appointments.some((a) => a.serviceId === serviceId);
+    }
+
+    if (hasAppointments) {
+      // Safe soft deactivation to preserve historical appointments
+      await this.updateClinicService(clinicId, serviceId, { isActive: false }, staffUser);
+      return {
+        success: true,
+        deactivated: true,
+        message: 'تم إيقاف تفعيل الخدمة لمنع الحجوزات الجديدة مع الحفاظ على سجلات الحجوزات السابقة المرتبطة بها.',
+      };
+    }
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        await (supabase as any).from('clinic_services').delete().eq('id', serviceId);
+      } catch (err) {
+        return { success: false, error: 'تعذر حذف الخدمة من قاعدة البيانات' };
+      }
+    }
+    this.services = this.services.filter((s) => s.id !== serviceId);
+    return { success: true, deactivated: false, message: 'تم حذف الخدمة بنجاح.' };
+  }
+
   public async getAllClinics(): Promise<Clinic[]> {
+    const allServices = await this.getClinicServices();
     if (isSupabaseConfigured()) {
       try {
         const supabase = createAdminClient();
         const { data, error } = await supabase
           .from('clinics')
           .select('*')
-          .eq('is_active', true);
+          .eq('is_active', true)
+          .order('display_order', { ascending: true });
         if (!error && data && data.length > 0) {
           const rows = data as unknown as Database['public']['Tables']['clinics']['Row'][];
           return rows.map((c) => ({
@@ -287,6 +576,8 @@ class AppointmentServiceStore {
             maxDailySlots: c.max_daily_slots,
             slotDurationMinutes: c.slot_duration_minutes,
             instructions: c.instructions || undefined,
+            requiredDocuments: (c as any).required_documents || [],
+            services: allServices.filter((s) => s.clinicId === c.id),
             isActive: c.is_active,
             isHospitalConfirmed: c.is_hospital_confirmed,
           }));
@@ -295,7 +586,13 @@ class AppointmentServiceStore {
         console.warn('Supabase fetch clinics fallback to local store:', err);
       }
     }
-    return this.clinics.filter((c) => c.isActive);
+    return this.clinics
+      .filter((c) => c.isActive)
+      .map((c) => ({
+        ...c,
+        requiredDocuments: c.requiredDocuments || ['أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي'],
+        services: allServices.filter((s) => s.clinicId === c.id),
+      }));
   }
 
   public getAllClinicsIncludingInactive(): Clinic[] {
@@ -304,6 +601,83 @@ class AppointmentServiceStore {
 
   public getClinicById(id: string): Clinic | undefined {
     return this.clinics.find((c) => c.id === id);
+  }
+
+  public async createClinic(
+    input: Partial<Clinic>,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; clinic?: Clinic; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'إنشاء عيادات جديدة يتطلب صلاحية مدير النظام' };
+    }
+    if (!input.name || input.name.trim().length === 0) {
+      return { success: false, error: 'اسم العيادة مطلوب' };
+    }
+    if (!input.location || input.location.trim().length === 0) {
+      return { success: false, error: 'موقع العيادة مطلوب' };
+    }
+
+    const clinicId = input.id?.trim() || `clinic_${Date.now()}`;
+    if (this.clinics.some((c) => c.id === clinicId)) {
+      return { success: false, error: 'معرف العيادة مستخدم مسبقاً' };
+    }
+
+    const newClinic: Clinic = {
+      id: clinicId,
+      name: input.name.trim(),
+      description: input.description?.trim() || '',
+      location: input.location.trim(),
+      workingHours: input.workingHours?.trim() || '08:30-14:00',
+      daysOfWeek: input.daysOfWeek && input.daysOfWeek.length > 0 ? input.daysOfWeek : [0, 1, 2, 3, 4, 6],
+      maxDailySlots: Number(input.maxDailySlots) > 0 ? Number(input.maxDailySlots) : 20,
+      slotDurationMinutes: Number(input.slotDurationMinutes) > 0 ? Number(input.slotDurationMinutes) : 30,
+      instructions: input.instructions?.trim() || 'إحضار شهادة ميلاد الطفل والتأمين الصحي. الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى.',
+      requiredDocuments: input.requiredDocuments || [
+        'أصل شهادة ميلاد الطفل أو بطاقة التأمين الصحي',
+        'صورة بطاقة ولي الأمر',
+      ],
+      isActive: input.isActive ?? true,
+      isHospitalConfirmed: input.isHospitalConfirmed ?? false,
+    };
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await supabase.from('clinics').insert({
+          id: newClinic.id,
+          name: newClinic.name,
+          description: newClinic.description || null,
+          location: newClinic.location,
+          working_hours: newClinic.workingHours,
+          days_of_week: newClinic.daysOfWeek,
+          max_daily_slots: newClinic.maxDailySlots,
+          slot_duration_minutes: newClinic.slotDurationMinutes,
+          instructions: newClinic.instructions || null,
+          required_documents: newClinic.requiredDocuments,
+          is_active: newClinic.isActive,
+          is_hospital_confirmed: newClinic.isHospitalConfirmed,
+        } as any);
+
+        if (error) {
+          console.error('Supabase create clinic error:', error);
+          return { success: false, error: 'فشل في حفظ العيادة في قاعدة البيانات المركزية' };
+        }
+      } catch (err: any) {
+        return { success: false, error: 'خطأ اتصال بقاعدة البيانات' };
+      }
+    } else if (!isMockStoreAllowed()) {
+      return { success: false, error: 'خدمة إنشاء العيادات غير متصلة بقاعدة البيانات في الإنتاج' };
+    }
+
+    this.clinics.push(newClinic);
+    this.addAuditLog(
+      staffUser.name,
+      staffUser.role,
+      'إنشاء عيادة جديدة',
+      `تم إنشاء عيادة جديدة: ${newClinic.name} بسعة يومية ${newClinic.maxDailySlots}`
+    );
+
+    return { success: true, clinic: newClinic };
   }
 
   public async updateClinic(
@@ -326,14 +700,17 @@ class AppointmentServiceStore {
           .from('clinics')
           .update({
             name: updates.name !== undefined ? updates.name : clinic.name,
+            description: updates.description !== undefined ? updates.description : clinic.description,
             location: updates.location !== undefined ? updates.location : clinic.location,
             working_hours: updates.workingHours !== undefined ? updates.workingHours : clinic.workingHours,
+            days_of_week: updates.daysOfWeek !== undefined ? updates.daysOfWeek : clinic.daysOfWeek,
             max_daily_slots: updates.maxDailySlots !== undefined ? updates.maxDailySlots : clinic.maxDailySlots,
             is_active: updates.isActive !== undefined ? updates.isActive : clinic.isActive,
             is_hospital_confirmed: updates.isHospitalConfirmed !== undefined ? updates.isHospitalConfirmed : (clinic.isHospitalConfirmed ?? false),
             instructions: updates.instructions !== undefined ? updates.instructions : clinic.instructions,
+            required_documents: updates.requiredDocuments !== undefined ? updates.requiredDocuments : (clinic.requiredDocuments || []),
             updated_at: new Date().toISOString(),
-          })
+          } as any)
           .eq('id', clinicId);
 
         if (error) {
@@ -359,11 +736,14 @@ class AppointmentServiceStore {
 
     // Apply updates locally only after DB confirmation (or in permitted mock mode)
     if (updates.name !== undefined) clinic.name = updates.name;
+    if (updates.description !== undefined) clinic.description = updates.description;
     if (updates.location !== undefined) clinic.location = updates.location;
     if (updates.workingHours !== undefined) clinic.workingHours = updates.workingHours;
+    if (updates.daysOfWeek !== undefined) clinic.daysOfWeek = updates.daysOfWeek;
     if (updates.maxDailySlots !== undefined) clinic.maxDailySlots = updates.maxDailySlots;
     if (updates.isActive !== undefined) clinic.isActive = updates.isActive;
     if (updates.instructions !== undefined) clinic.instructions = updates.instructions;
+    if (updates.requiredDocuments !== undefined) clinic.requiredDocuments = updates.requiredDocuments;
     if (updates.isHospitalConfirmed !== undefined) clinic.isHospitalConfirmed = updates.isHospitalConfirmed;
 
     this.addAuditLog(
@@ -374,6 +754,235 @@ class AppointmentServiceStore {
     );
 
     return { success: true, clinic };
+  }
+
+  public async deleteClinic(
+    clinicId: string,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; deactivated?: boolean; message?: string; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'حذف العيادات يتطلب صلاحية مدير النظام' };
+    }
+    const clinic = this.getClinicById(clinicId);
+    if (!clinic) {
+      return { success: false, error: 'العيادة غير موجودة' };
+    }
+
+    let hasAppointments = false;
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { count } = await (supabase as any)
+          .from('appointments')
+          .select('id', { count: 'exact', head: true })
+          .eq('clinic_id', clinicId);
+        hasAppointments = (count || 0) > 0;
+      } catch (err) {
+        console.warn('Check clinic appointments error:', err);
+      }
+    } else {
+      hasAppointments = this.appointments.some((a) => a.clinicId === clinicId);
+    }
+
+    if (hasAppointments) {
+      // Safe soft deactivation
+      await this.updateClinic(clinicId, { isActive: false }, staffUser);
+      return {
+        success: true,
+        deactivated: true,
+        message: `تم إيقاف تفعيل "${clinic.name}" لمنع الحجوزات الجديدة مع الحفاظ على سجلات وتاريخ مواعيد المرضى السابقة.`,
+      };
+    }
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        await supabase.from('clinics').delete().eq('id', clinicId);
+      } catch (err) {
+        return { success: false, error: 'تعذر حذف العيادة من قاعدة البيانات' };
+      }
+    }
+
+    this.clinics = this.clinics.filter((c) => c.id !== clinicId);
+    this.addAuditLog(
+      staffUser.name,
+      staffUser.role,
+      'حذف عيادة',
+      `تم حذف العيادة ${clinic.name} نهائياً لعدم وجود حجوزات سابقة مرتبطة بها`
+    );
+
+    return { success: true, deactivated: false, message: `تم حذف العيادة "${clinic.name}" بنجاح.` };
+  }
+
+  public async getClinicSchedules(clinicId: string): Promise<ClinicScheduleException[]> {
+    const todayCairo = getTodayCairoDateString();
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { data, error } = await (supabase as any)
+          .from('clinic_schedules')
+          .select('*')
+          .eq('clinic_id', clinicId)
+          .gte('schedule_date', todayCairo)
+          .order('schedule_date', { ascending: true });
+
+        if (!error && data && Array.isArray(data)) {
+          return data.map((s: any) => ({
+            id: s.id,
+            clinicId: s.clinic_id,
+            scheduleDate: s.schedule_date,
+            maxCapacity: s.max_capacity,
+            isClosed: s.is_closed,
+            closureReason: s.closure_reason || undefined,
+            createdAt: s.created_at,
+            updatedAt: s.updated_at,
+          }));
+        }
+      } catch (err) {
+        console.warn('Supabase getClinicSchedules error:', err);
+      }
+    }
+
+    return this.schedules
+      .filter((s) => s.clinicId === clinicId && s.scheduleDate >= todayCairo)
+      .sort((a, b) => a.scheduleDate.localeCompare(b.scheduleDate));
+  }
+
+  public async getClinicScheduleForDate(
+    clinicId: string,
+    scheduleDate: string
+  ): Promise<ClinicScheduleException | undefined> {
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { data, error } = await (supabase as any)
+          .from('clinic_schedules')
+          .select('*')
+          .eq('clinic_id', clinicId)
+          .eq('schedule_date', scheduleDate)
+          .maybeSingle();
+
+        if (!error && data) {
+          return {
+            id: data.id,
+            clinicId: data.clinic_id,
+            scheduleDate: data.schedule_date,
+            maxCapacity: data.max_capacity,
+            isClosed: data.is_closed,
+            closureReason: data.closure_reason || undefined,
+            createdAt: data.created_at,
+            updatedAt: data.updated_at,
+          };
+        }
+      } catch (err) {
+        console.warn('Supabase getClinicScheduleForDate error:', err);
+      }
+    }
+
+    return this.schedules.find((s) => s.clinicId === clinicId && s.scheduleDate === scheduleDate);
+  }
+
+  public async upsertClinicScheduleException(
+    clinicId: string,
+    input: Partial<ClinicScheduleException>,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; schedule?: ClinicScheduleException; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'إدارة استثناءات التقويم تتطلب صلاحية مدير النظام' };
+    }
+    const clinic = this.getClinicById(clinicId);
+    if (!clinic) {
+      return { success: false, error: 'العيادة غير موجودة' };
+    }
+    if (!input.scheduleDate) {
+      return { success: false, error: 'تاريخ الاستثناء مطلوب' };
+    }
+    const todayCairo = getTodayCairoDateString();
+    if (input.scheduleDate < todayCairo) {
+      return { success: false, error: 'لا يمكن إضافة استثناء لتاريخ ماضي' };
+    }
+
+    const scheduleItem: ClinicScheduleException = {
+      id: input.id || `sched_${clinicId}_${input.scheduleDate}`,
+      clinicId,
+      scheduleDate: input.scheduleDate,
+      maxCapacity: input.maxCapacity !== undefined ? Number(input.maxCapacity) : clinic.maxDailySlots,
+      isClosed: Boolean(input.isClosed),
+      closureReason: input.closureReason?.trim() || undefined,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { error } = await (supabase as any)
+          .from('clinic_schedules')
+          .upsert(
+            {
+              clinic_id: scheduleItem.clinicId,
+              schedule_date: scheduleItem.scheduleDate,
+              max_capacity: scheduleItem.maxCapacity,
+              is_closed: scheduleItem.isClosed,
+              closure_reason: scheduleItem.closureReason || null,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'clinic_id,schedule_date' }
+          );
+
+        if (error) {
+          console.error('Supabase upsert schedule error:', error);
+          return { success: false, error: 'فشل حفظ الاستثناء في قاعدة البيانات' };
+        }
+      } catch (err) {
+        return { success: false, error: 'خطأ اتصال بقاعدة البيانات' };
+      }
+    }
+
+    // Update local memory
+    const existingIndex = this.schedules.findIndex(
+      (s) => s.clinicId === clinicId && s.scheduleDate === input.scheduleDate
+    );
+    if (existingIndex >= 0) {
+      this.schedules[existingIndex] = scheduleItem;
+    } else {
+      this.schedules.push(scheduleItem);
+    }
+
+    this.addAuditLog(
+      staffUser.name,
+      staffUser.role,
+      'تعديل جدول العيادة',
+      `تم تعديل استثناء تاريخ ${scheduleItem.scheduleDate} لعيادة ${clinic.name}: ${scheduleItem.isClosed ? 'إغلاق عطلة' : `سعة استثنائية (${scheduleItem.maxCapacity})`}`
+    );
+
+    return { success: true, schedule: scheduleItem };
+  }
+
+  public async deleteClinicScheduleException(
+    clinicId: string,
+    scheduleDate: string,
+    staffUser: StaffUser
+  ): Promise<{ success: boolean; error?: string }> {
+    if (staffUser.role !== 'ADMIN') {
+      return { success: false, error: 'حذف استثناءات التقويم يتطلب صلاحية مدير النظام' };
+    }
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        await (supabase as any)
+          .from('clinic_schedules')
+          .delete()
+          .eq('clinic_id', clinicId)
+          .eq('schedule_date', scheduleDate);
+      } catch (err) {
+        return { success: false, error: 'تعذر حذف الاستثناء من قاعدة البيانات' };
+      }
+    }
+    this.schedules = this.schedules.filter(
+      (s) => !(s.clinicId === clinicId && s.scheduleDate === scheduleDate)
+    );
+    return { success: true };
   }
 
   public getAvailableSlots(clinicId: string, dateStr: string): AppointmentSlot[] {
@@ -429,7 +1038,7 @@ class AppointmentServiceStore {
     }
 
     const clinic = this.getClinicById(input.clinicId);
-    if (!clinic) {
+    if (!clinic || !clinic.isActive) {
       return { success: false, error: 'العيادة المختارة غير موجودة أو غير مفعلة' };
     }
 
@@ -437,10 +1046,94 @@ class AppointmentServiceStore {
       return { success: false, error: 'تاريخ الموعد مطلوب' };
     }
 
-    const todayStr = getTodayDateString();
-    if (input.appointmentDate < todayStr) {
+    const todayCairo = getTodayCairoDateString();
+    if (input.appointmentDate < todayCairo) {
       return { success: false, error: 'لا يمكن حجز موعد في تاريخ سابق' };
     }
+
+    // Maximum booking horizon: 30 days ahead
+    const maxHorizonDate = new Date();
+    maxHorizonDate.setUTCDate(maxHorizonDate.getUTCDate() + 30);
+    const maxHorizonString = maxHorizonDate.toISOString().split('T')[0];
+    if (input.appointmentDate > maxHorizonString) {
+      return { success: false, error: 'الحجز الإلكتروني متاح بحد أقصى 30 يوماً مقدماً' };
+    }
+
+    // Check schedule overrides, closures, and capacity from clinic_schedules (Precedence rule)
+    let effectiveCapacity = clinic.maxDailySlots;
+    const scheduleOverride = await this.getClinicScheduleForDate(input.clinicId, input.appointmentDate);
+    if (scheduleOverride) {
+      if (scheduleOverride.isClosed) {
+        return {
+          success: false,
+          error: `العيادة مغلقة في هذا التاريخ${scheduleOverride.closureReason ? ': ' + scheduleOverride.closureReason : ' نظراً لعطلة رسمية أو ظرف طارئ.'}`,
+        };
+      }
+      if (scheduleOverride.maxCapacity !== undefined && scheduleOverride.maxCapacity !== null) {
+        effectiveCapacity = scheduleOverride.maxCapacity;
+      }
+    } else {
+      const appointmentDateObj = new Date(input.appointmentDate + 'T12:00:00Z');
+      const dayOfWeek = appointmentDateObj.getUTCDay();
+      if (!clinic.daysOfWeek.includes(dayOfWeek)) {
+        return {
+          success: false,
+          error: 'العيادة المختارة لا تعمل في هذا اليوم (عطلة أسبوعية). يرجى اختيار يوم عمل رسمي للعيادة.',
+        };
+      }
+    }
+
+    // Resolve service details & validate service-clinic match
+    const clinicServices = await this.getClinicServices(input.clinicId);
+    let matchedService: ClinicService | undefined;
+    if (input.serviceId) {
+      matchedService = clinicServices.find((s) => s.id === input.serviceId && s.isActive);
+      if (!matchedService) {
+        return { success: false, error: 'الخدمة المختارة غير تابعة لهذه العيادة أو غير مفعلة' };
+      }
+    } else {
+      matchedService = clinicServices.find((s) => s.isActive) || clinicServices[0];
+    }
+    const resolvedServiceName = input.serviceName || matchedService?.name || 'كشف واستشارة طبية';
+
+    // Check per-service capacity if defined
+    if (matchedService?.maxDailyCapacity) {
+      let currentServiceBooked = 0;
+      if (isSupabaseConfigured()) {
+        try {
+          const supabase = createAdminClient();
+          const { count } = await (supabase as any)
+            .from('appointments')
+            .select('id', { count: 'exact', head: true })
+            .eq('clinic_id', input.clinicId)
+            .eq('service_id', matchedService.id)
+            .eq('appointment_date', input.appointmentDate)
+            .neq('status', 'CANCELLED');
+          currentServiceBooked = count || 0;
+        } catch (err) {
+          console.warn('Check service booked count error:', err);
+        }
+      } else {
+        currentServiceBooked = this.appointments.filter(
+          (a) =>
+            a.clinicId === input.clinicId &&
+            a.serviceId === matchedService!.id &&
+            a.appointmentDate === input.appointmentDate &&
+            a.status !== 'CANCELLED'
+        ).length;
+      }
+
+      if (currentServiceBooked >= matchedService.maxDailyCapacity) {
+        return {
+          success: false,
+          error: `عفواً، اكتملت السعة اليومية المتاحة لخدمة "${matchedService.name}" في هذا التاريخ (${matchedService.maxDailyCapacity} مريض). يرجى اختيار موعد آخر أو خدمة بديلة.`,
+        };
+      }
+    }
+
+    // Generate unambiguous CSPRNG booking code
+    const bookingCode = generateBookingCode();
+    const bookingCodeHash = hashBookingCode(bookingCode);
 
     const slots = this.getAvailableSlots(input.clinicId, input.appointmentDate);
     let selectedTime = input.appointmentTime;
@@ -473,6 +1166,9 @@ class AppointmentServiceStore {
           p_appointment_date: input.appointmentDate,
           p_appointment_time: selectedTime || '09:00',
           p_reference_number: ref,
+          p_service_id: matchedService?.id || null,
+          p_guardian_national_id: input.guardianNationalId?.trim() || null,
+          p_staff_user_id: input.staffUserId || null,
         });
 
         if (error) {
@@ -497,14 +1193,20 @@ class AppointmentServiceStore {
               referenceNumber: dbApt.reference_number,
               clinicId: dbApt.clinic_id,
               clinicName: dbApt.clinic_name,
+              serviceId: matchedService?.id,
+              serviceName: resolvedServiceName,
               patientName: dbApt.patient_name,
               phoneNumber: dbApt.phone_number,
               patientAge: dbApt.patient_age || undefined,
               patientAddress: dbApt.patient_address || undefined,
+              bookingCode: bookingCode, // Unhashed transient code returned once for the ticket receipt
+              bookingCodeHash: bookingCodeHash,
+              requiredDocuments: matchedService?.requiredDocuments,
+              serviceInstructions: matchedService?.instructions,
               appointmentDate: dbApt.appointment_date,
               appointmentTime: dbApt.appointment_time,
               status: dbApt.status,
-              queueNumber: dbApt.queue_number,
+              queueNumber: dbApt.queue_number ?? undefined,
               createdAt: dbApt.created_at || new Date().toISOString(),
               updatedAt: dbApt.updated_at || new Date().toISOString(),
               statusHistory: [
@@ -535,7 +1237,7 @@ class AppointmentServiceStore {
           const supabase = createAdminClient();
           const { data: existingApt } = await supabase
             .from('appointments')
-            .select('*')
+            .select('id, reference_number, clinic_id, clinic_name, patient_name, phone_number, patient_age, patient_address, appointment_date, appointment_time, status, queue_number, created_at, updated_at')
             .eq('reference_number', ref)
             .maybeSingle();
 
@@ -579,24 +1281,33 @@ class AppointmentServiceStore {
       };
     }
 
-    // Local memory transaction check fallback
+    // Local memory transaction check fallback (allows siblings with different patient names)
+    const normalizedInputName = input.patientName.trim().toLowerCase().replace(/\s+/g, ' ');
     const existing = this.appointments.find(
       (a) =>
         a.phoneNumber === phoneCheck.normalized &&
         a.clinicId === input.clinicId &&
         a.appointmentDate === input.appointmentDate &&
+        a.patientName.trim().toLowerCase().replace(/\s+/g, ' ') === normalizedInputName &&
         a.status !== 'CANCELLED'
     );
     if (existing) {
       return {
         success: false,
-        error: `يوجد حجز مسبق بالفعل لهذا الرقم في ${clinic.name} بنفس التاريخ برقم مرجعي (${existing.referenceNumber})`,
+        error: `يوجد حجز مسبق بالفعل لنفس المريض في ${clinic.name} بنفس التاريخ برقم مرجعي (${existing.referenceNumber})`,
       };
     }
 
     const dayBookingsCount = this.appointments.filter(
       (a) => a.clinicId === input.clinicId && a.appointmentDate === input.appointmentDate && a.status !== 'CANCELLED'
     ).length;
+
+    if (dayBookingsCount >= effectiveCapacity) {
+      return {
+        success: false,
+        error: `عفواً، اكتملت السعة اليومية المتاحة للعيادة في هذا التاريخ (${effectiveCapacity} مريض). يرجى اختيار موعد آخر.`,
+      };
+    }
     const queueNumber = dayBookingsCount + 1;
 
     const now = new Date().toISOString();
@@ -607,6 +1318,13 @@ class AppointmentServiceStore {
       referenceNumber: ref,
       clinicId: clinic.id,
       clinicName: clinic.name,
+      serviceId: matchedService?.id,
+      serviceName: resolvedServiceName,
+      guardianNationalId: input.guardianNationalId ? input.guardianNationalId.trim() : undefined,
+      bookingCode: bookingCode,
+      bookingCodeHash: bookingCodeHash,
+      requiredDocuments: matchedService?.requiredDocuments,
+      serviceInstructions: matchedService?.instructions,
       patientName: input.patientName.trim(),
       phoneNumber: phoneCheck.normalized,
       patientAge: input.patientAge?.trim() || undefined,
@@ -694,45 +1412,121 @@ class AppointmentServiceStore {
     );
   }
 
-  public async trackAppointmentsByVerifiedPhone(
-    phoneNumber: string
-  ): Promise<Appointment[]> {
+  public async getActiveBookingHashesForPhone(phoneNumber: string): Promise<string[]> {
     const phoneCheck = normalizeAndValidateEgyptianPhone(phoneNumber);
     if (!phoneCheck.isValid) return [];
     const cleanPhone = phoneCheck.normalized;
+    const todayCairo = getTodayCairoDateString();
 
     if (isSupabaseConfigured()) {
       try {
         const supabase = createAdminClient();
         const { data, error } = await (supabase as any)
           .from('appointments')
-          .select('id, reference_number, clinic_id, clinic_name, patient_name, appointment_date, appointment_time, status, queue_number')
+          .select('booking_code_hash')
           .eq('phone_number', cleanPhone)
-          .order('appointment_date', { ascending: false });
+          .gte('appointment_date', todayCairo)
+          .neq('status', 'CANCELLED');
+        if (!error && data && Array.isArray(data)) {
+          return data.map((r: any) => r.booking_code_hash).filter(Boolean);
+        }
+      } catch (err) {
+        console.warn('Supabase getActiveBookingHashesForPhone error:', err);
+      }
+    }
+
+    return this.appointments
+      .filter((a) => a.phoneNumber === cleanPhone && a.appointmentDate >= todayCairo && a.status !== 'CANCELLED')
+      .map((a) => a.bookingCodeHash)
+      .filter((h): h is string => Boolean(h));
+  }
+
+  public async trackAppointmentsByVerifiedPhone(
+    phoneNumber: string
+  ): Promise<Appointment[]> {
+    const phoneCheck = normalizeAndValidateEgyptianPhone(phoneNumber);
+    if (!phoneCheck.isValid) return [];
+    const cleanPhone = phoneCheck.normalized;
+    const todayCairo = getTodayCairoDateString();
+    const allServices = await this.getClinicServices();
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { data, error } = await (supabase as any)
+          .from('appointments')
+          .select('id, reference_number, clinic_id, clinic_name, service_id, service_name, patient_name, patient_age, patient_address, appointment_date, appointment_time, status, queue_number')
+          .eq('phone_number', cleanPhone)
+          .gte('appointment_date', todayCairo)
+          .neq('status', 'CANCELLED')
+          .order('appointment_date', { ascending: true });
 
         if (!error && data && Array.isArray(data)) {
-          return data.map((dbApt: any) => ({
-            id: dbApt.id || dbApt.reference_number,
-            referenceNumber: dbApt.reference_number,
-            clinicId: dbApt.clinic_id,
-            clinicName: dbApt.clinic_name,
-            patientName: dbApt.patient_name,
-            phoneNumber: cleanPhone,
-            appointmentDate: dbApt.appointment_date,
-            appointmentTime: dbApt.appointment_time,
-            status: dbApt.status,
-            queueNumber: dbApt.queue_number,
-            createdAt: '',
-            updatedAt: '',
-            statusHistory: [],
-          }));
+          return data.map((dbApt: any) => {
+            const matchedService = dbApt.service_id
+              ? allServices.find((s) => s.id === dbApt.service_id)
+              : allServices.find((s) => s.clinicId === dbApt.clinic_id);
+            const clinic = this.getClinicById(dbApt.clinic_id);
+            return {
+              id: dbApt.id || dbApt.reference_number,
+              referenceNumber: dbApt.reference_number,
+              clinicId: dbApt.clinic_id,
+              clinicName: dbApt.clinic_name,
+              serviceId: dbApt.service_id || matchedService?.id,
+              serviceName: dbApt.service_name || matchedService?.name || 'كشف واستشارة طبية',
+              patientName: maskPatientName(dbApt.patient_name),
+              phoneNumber: cleanPhone,
+              appointmentDate: dbApt.appointment_date,
+              appointmentTime: '',
+              status: dbApt.status,
+              queueNumber: dbApt.queue_number ?? undefined,
+              requiredDocuments: [
+                ...(clinic?.requiredDocuments || []),
+                ...(matchedService?.requiredDocuments || []),
+              ],
+              serviceInstructions: matchedService?.instructions || clinic?.instructions || 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال.',
+              createdAt: '',
+              updatedAt: '',
+              statusHistory: [],
+            };
+          });
         }
       } catch (err) {
         console.warn('Supabase trackAppointmentsByVerifiedPhone error:', err);
       }
     }
 
-    return this.appointments.filter((a) => a.phoneNumber === cleanPhone);
+    return this.appointments
+      .filter((a) => a.phoneNumber === cleanPhone && a.appointmentDate >= todayCairo && a.status !== 'CANCELLED')
+      .map((a) => {
+        const matchedService = a.serviceId
+          ? allServices.find((s) => s.id === a.serviceId)
+          : allServices.find((s) => s.clinicId === a.clinicId);
+        const clinic = this.getClinicById(a.clinicId);
+        return {
+          id: a.id,
+          referenceNumber: a.referenceNumber,
+          clinicId: a.clinicId,
+          clinicName: a.clinicName,
+          serviceId: a.serviceId || matchedService?.id,
+          serviceName: a.serviceName || matchedService?.name || 'كشف واستشارة طبية',
+          patientName: maskPatientName(a.patientName),
+          phoneNumber: cleanPhone,
+          appointmentDate: a.appointmentDate,
+          appointmentTime: '',
+          status: a.status,
+          queueNumber: a.queueNumber,
+          requiredDocuments: [
+            ...(clinic?.requiredDocuments || []),
+            ...(matchedService?.requiredDocuments || a.requiredDocuments || []),
+          ],
+          serviceInstructions: matchedService?.instructions || clinic?.instructions || a.serviceInstructions || 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال.',
+          createdAt: '',
+          updatedAt: '',
+          statusHistory: [],
+        };
+      })
+      .sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate));
   }
 
   public getAppointmentById(id: string): Appointment | undefined {
@@ -758,6 +1552,9 @@ class AppointmentServiceStore {
       if (staffUser.role === 'RECEPTIONIST') {
         if (targetStatus === 'COMPLETED') {
           return { success: false, error: 'إتمام الكشف الطبي وصرف التذكرة صلاحية طبية مخصصة للأطباء فقط' };
+        }
+        if (staffUser.clinicId && apt.clinicId !== staffUser.clinicId) {
+          return { success: false, error: 'غير مصرح لموظف الاستقبال بتعديل مواعيد خاصة بعيادة أخرى' };
         }
       } else if (staffUser.role === 'DOCTOR') {
         if (!staffUser.clinicId) {
@@ -863,6 +1660,14 @@ class AppointmentServiceStore {
     if (!apt) {
       return { success: false, error: 'الحجز غير موجود' };
     }
+
+    if (staffUser.role === 'DOCTOR' && staffUser.clinicId && staffUser.clinicId !== apt.clinicId) {
+      return { success: false, error: 'غير مصرح للطبيب بنداء مرضى عيادة أخرى' };
+    }
+    if (staffUser.role === 'RECEPTIONIST' && staffUser.clinicId && staffUser.clinicId !== apt.clinicId) {
+      return { success: false, error: 'غير مصرح لموظف الاستقبال بنداء مرضى عيادة أخرى' };
+    }
+
     if (apt.status !== 'CHECKED_IN' && apt.status !== 'CONFIRMED') {
       return { success: false, error: 'يمكن نداء أو إعادة نداء المرضى في حالة "مؤكد" أو "حضر المريض" فقط' };
     }
@@ -931,6 +1736,20 @@ class AppointmentServiceStore {
     reason: string,
     staffUser: StaffUser
   ): Promise<{ success: boolean; appointment?: Appointment; error?: string }> {
+    // 1. Validate Staff Authorization
+    if (staffUser.role === 'DOCTOR' && staffUser.clinicId) {
+      const aptCheck = this.getAppointmentById(id);
+      if (aptCheck && aptCheck.clinicId !== staffUser.clinicId) {
+        return { success: false, error: 'الطبيب مصرح له فقط بتحويل الحالات المسجلة بعيادته الخاصة' };
+      }
+    }
+    if (staffUser.role === 'RECEPTIONIST' && staffUser.clinicId) {
+      const aptCheck = this.getAppointmentById(id);
+      if (aptCheck && aptCheck.clinicId !== staffUser.clinicId) {
+        return { success: false, error: 'موظف الاستقبال غير مصرح له بتحويل حالات من عيادة أخرى' };
+      }
+    }
+
     const apt = this.getAppointmentById(id);
     if (!apt) {
       return { success: false, error: 'الحجز غير موجود' };
@@ -941,16 +1760,59 @@ class AppointmentServiceStore {
       return { success: false, error: 'العيادة المحول إليها غير متوفرة' };
     }
 
+    if (!targetClinic.isActive) {
+      return { success: false, error: 'العيادة المحول إليها غير مفعلة حالياً' };
+    }
+
     if (apt.clinicId === targetClinicId) {
       return { success: false, error: 'المريض مسجل بالفعل في هذه العيادة' };
     }
 
-    const oldClinicName = apt.clinicName;
+    // 2. Validate Target Clinic Calendar & Schedule Precedence
+    const scheduleException = await this.getClinicScheduleForDate(targetClinic.id, apt.appointmentDate);
+    if (scheduleException?.isClosed) {
+      return {
+        success: false,
+        error: `العيادة المحول إليها مغلقة في هذا التاريخ (${scheduleException.closureReason || 'عطلة رسمية'})`,
+      };
+    }
+    if (!scheduleException) {
+      const dayOfWeek = new Date(apt.appointmentDate + 'T12:00:00Z').getDay();
+      if (!targetClinic.daysOfWeek.includes(dayOfWeek)) {
+        return { success: false, error: 'العيادة المحول إليها لا تعمل في هذا اليوم (عطلة أسبوعية)' };
+      }
+    }
+    const effectiveCapacity = scheduleException?.maxCapacity ?? targetClinic.maxDailySlots;
 
-    // Calculate next queue number in target clinic
-    const targetDayCount = this.appointments.filter(
-      (a) => a.clinicId === targetClinicId && a.appointmentDate === apt.appointmentDate && a.status !== 'CANCELLED'
-    ).length;
+    // 3. Count Target Clinic Bookings & Verify Capacity
+    let targetDayCount = 0;
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        const { count } = await (supabase as any)
+          .from('appointments')
+          .select('id', { count: 'exact', head: true })
+          .eq('clinic_id', targetClinicId)
+          .eq('appointment_date', apt.appointmentDate)
+          .neq('status', 'CANCELLED');
+        targetDayCount = count || 0;
+      } catch (err) {
+        console.warn('Count target clinic booked error:', err);
+      }
+    } else {
+      targetDayCount = this.appointments.filter(
+        (a) => a.clinicId === targetClinicId && a.appointmentDate === apt.appointmentDate && a.status !== 'CANCELLED'
+      ).length;
+    }
+
+    if (targetDayCount >= effectiveCapacity) {
+      return {
+        success: false,
+        error: `عفواً، سعة العيادة المحول إليها مكتملة في هذا اليوم (${effectiveCapacity} مريض)`,
+      };
+    }
+
+    const oldClinicName = apt.clinicName;
     const newQueue = targetDayCount + 1;
     const now = new Date().toISOString();
     const transferNote = `تم التحويل من [${oldClinicName}] إلى [${targetClinic.name}] برقم دور جديد (#${newQueue}). السبب: ${reason || 'تحويل طبي داخلي'}`;
@@ -1012,20 +1874,71 @@ class AppointmentServiceStore {
     return { success: true, appointment: apt };
   }
 
-  public async cancelAppointment(id: string, reason?: string): Promise<{ success: boolean; error?: string }> {
-    const apt = this.getAppointmentById(id);
-    if (!apt) {
-      return { success: false, error: 'الموعد غير موجود' };
-    }
-    if (apt.status === 'COMPLETED' || apt.status === 'CANCELLED') {
-      return { success: false, error: 'لا يمكن إلغاء حجز مكتمل أو ملغي مسبقاً' };
-    }
-
-    const now = new Date().toISOString();
+  public async cancelAppointment(
+    idOrRef: string,
+    reason?: string,
+    caller?: { staffUser?: StaffUser; phoneNumber?: string }
+  ): Promise<{ success: boolean; error?: string }> {
+    let apt = this.appointments.find((a) => a.id === idOrRef || a.referenceNumber === idOrRef);
 
     if (isSupabaseConfigured()) {
       try {
         const supabase = createAdminClient();
+        if (!apt) {
+          const { data: dbApt } = await supabase
+            .from('appointments')
+            .select('*')
+            .or(`id.eq.${idOrRef},reference_number.eq.${idOrRef}`)
+            .maybeSingle();
+
+          if (dbApt) {
+            apt = {
+              id: dbApt.id,
+              referenceNumber: dbApt.reference_number,
+              clinicId: dbApt.clinic_id,
+              clinicName: dbApt.clinic_name,
+              patientName: dbApt.patient_name,
+              phoneNumber: dbApt.phone_number,
+              patientAge: dbApt.patient_age || undefined,
+              patientAddress: dbApt.patient_address || undefined,
+              appointmentDate: dbApt.appointment_date,
+              appointmentTime: dbApt.appointment_time,
+              status: dbApt.status,
+              queueNumber: dbApt.queue_number ?? undefined,
+              createdAt: dbApt.created_at,
+              updatedAt: dbApt.updated_at,
+              statusHistory: [],
+            };
+          }
+        }
+
+        if (!apt) {
+          return { success: false, error: 'الموعد غير موجود' };
+        }
+
+        if (apt.status === 'COMPLETED' || apt.status === 'CANCELLED') {
+          return { success: false, error: 'لا يمكن إلغاء حجز مكتمل أو ملغي مسبقاً' };
+        }
+
+        // Authorization checks
+        if (caller?.staffUser) {
+          if (caller.staffUser.role === 'DOCTOR' && caller.staffUser.clinicId && apt.clinicId !== caller.staffUser.clinicId) {
+            return { success: false, error: 'غير مصرح للطبيب بإلغاء حجز تابع لعيادة أخرى' };
+          }
+          if (caller.staffUser.role === 'RECEPTIONIST' && caller.staffUser.clinicId && apt.clinicId !== caller.staffUser.clinicId) {
+            return { success: false, error: 'غير مصرح لموظف الاستقبال بإلغاء حجز تابع لعيادة أخرى' };
+          }
+        } else if (caller?.phoneNumber) {
+          const callerPhone = normalizeAndValidateEgyptianPhone(caller.phoneNumber).normalized;
+          const aptPhone = normalizeAndValidateEgyptianPhone(apt.phoneNumber).normalized;
+          if (callerPhone !== aptPhone) {
+            return { success: false, error: 'رقم الهاتف غير مطابق لبيانات الحجز' };
+          }
+        } else {
+          return { success: false, error: 'غير مصرح بإلغاء الحجز دون التحقق من الهوية أو رقم الهاتف' };
+        }
+
+        const now = new Date().toISOString();
         const { error } = await supabase
           .from('appointments')
           .update({ status: 'CANCELLED', updated_at: now })
@@ -1039,9 +1952,13 @@ class AppointmentServiceStore {
         await supabase.from('appointment_status_history').insert({
           appointment_id: apt.id,
           status: 'CANCELLED',
-          note: reason ? `تم الإلغاء: ${reason}` : 'تم إلغاء الحجز بواسطة المريض',
-          updated_by: 'المريض',
+          note: reason ? `تم الإلغاء: ${reason}` : (caller?.staffUser ? `تم الإلغاء بواسطة ${caller.staffUser.name}` : 'تم إلغاء الحجز بواسطة ولي الأمر'),
+          updated_by: caller?.staffUser?.name || 'ولي الأمر',
         });
+
+        apt.status = 'CANCELLED';
+        apt.updatedAt = now;
+        return { success: true };
       } catch (err: any) {
         console.error('Supabase cancel exception:', err?.message || 'Network error');
         return { success: false, error: 'تعذر الاتصال بقاعدة البيانات لإلغاء الحجز.' };
@@ -1050,12 +1967,37 @@ class AppointmentServiceStore {
       return { success: false, error: 'خدمة إلغاء الحجز غير متصلة بقاعدة البيانات في بيئة الإنتاج.' };
     }
 
+    if (!apt) {
+      return { success: false, error: 'الموعد غير موجود' };
+    }
+    if (apt.status === 'COMPLETED' || apt.status === 'CANCELLED') {
+      return { success: false, error: 'لا يمكن إلغاء حجز مكتمل أو ملغي مسبقاً' };
+    }
+
+    if (caller?.staffUser) {
+      if (caller.staffUser.role === 'DOCTOR' && caller.staffUser.clinicId && apt.clinicId !== caller.staffUser.clinicId) {
+        return { success: false, error: 'غير مصرح للطبيب بإلغاء حجز تابع لعيادة أخرى' };
+      }
+      if (caller.staffUser.role === 'RECEPTIONIST' && caller.staffUser.clinicId && apt.clinicId !== caller.staffUser.clinicId) {
+        return { success: false, error: 'غير مصرح لموظف الاستقبال بإلغاء حجز تابع لعيادة أخرى' };
+      }
+    } else if (caller?.phoneNumber) {
+      const callerPhone = normalizeAndValidateEgyptianPhone(caller.phoneNumber).normalized;
+      const aptPhone = normalizeAndValidateEgyptianPhone(apt.phoneNumber).normalized;
+      if (callerPhone !== aptPhone) {
+        return { success: false, error: 'رقم الهاتف غير مطابق لبيانات الحجز' };
+      }
+    } else {
+      return { success: false, error: 'غير مصرح بإلغاء الحجز دون التحقق من الهوية أو رقم الهاتف' };
+    }
+
+    const now = new Date().toISOString();
     apt.status = 'CANCELLED';
     apt.updatedAt = now;
     apt.statusHistory.push({
       status: 'CANCELLED',
       timestamp: now,
-      note: reason ? `تم الإلغاء: ${reason}` : 'تم إلغاء الحجز بواسطة المريض',
+      note: reason ? `تم الإلغاء: ${reason}` : (caller?.staffUser ? `تم الإلغاء بواسطة ${caller.staffUser.name}` : 'تم إلغاء الحجز بواسطة ولي الأمر'),
     });
 
     return { success: true };
@@ -1084,7 +2026,7 @@ class AppointmentServiceStore {
         const supabase = createAdminClient();
         let query = supabase
           .from('appointments')
-          .select('*')
+          .select('id, reference_number, clinic_id, clinic_name, patient_name, phone_number, patient_age, patient_address, appointment_date, appointment_time, status, queue_number, last_called_at, called_count, notes, created_at, updated_at')
           .order('appointment_date', { ascending: true })
           .order('queue_number', { ascending: true });
 
@@ -1103,7 +2045,12 @@ class AppointmentServiceStore {
         }
 
         const { data, error } = await query;
-        if (!error && data && data.length > 0) {
+        if (error) {
+          console.error('Supabase fetch staff appointments error:', error);
+          if (!isMockStoreAllowed()) {
+            throw new Error('فشل جلب قائمة الحجوزات من قاعدة البيانات المركزية');
+          }
+        } else if (data) {
           return data.map((dbApt: any) => ({
             id: dbApt.id,
             referenceNumber: dbApt.reference_number,
@@ -1125,12 +2072,17 @@ class AppointmentServiceStore {
             statusHistory: [],
           }));
         }
-      } catch (err) {
-        console.warn('Supabase fetch staff appointments error:', err);
+      } catch (err: any) {
+        console.error('Supabase fetch staff appointments exception:', err?.message || err);
+        if (!isMockStoreAllowed()) {
+          throw err;
+        }
       }
+    } else if (!isMockStoreAllowed()) {
+      throw new Error('قاعدة البيانات المركزية غير متصلة في بيئة الإنتاج');
     }
 
-    // Local in-memory fallback
+    // Local in-memory fallback (development & test mode only)
     let result = [...this.appointments];
 
     if (effectiveClinicId && effectiveClinicId !== 'ALL') {

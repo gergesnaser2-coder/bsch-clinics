@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Stethoscope,
   Heart,
@@ -18,8 +18,12 @@ import {
   Sliders,
   CheckCircle2,
   Lock,
+  ListPlus,
+  Plus,
+  Edit2,
 } from 'lucide-react';
 import type { ClinicPresentation } from '@/types/cms';
+import type { ClinicService } from '@/types';
 
 interface ClinicsPresentationEditorProps {
   initialClinics: ClinicPresentation[];
@@ -61,6 +65,79 @@ export default function ClinicsPresentationEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Clinic Services state
+  const [services, setServices] = useState<ClinicService[]>([]);
+  const [loadingServices, setLoadingServices] = useState(false);
+  const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
+  const [serviceSaving, setServiceSaving] = useState(false);
+  const [serviceSuccessMsg, setServiceSuccessMsg] = useState<string | null>(null);
+
+  // Load services whenever selectedClinicId changes
+  useEffect(() => {
+    let active = true;
+    if (!selectedClinicId) return;
+
+    async function loadServices() {
+      setLoadingServices(true);
+      try {
+        const res = await fetch(`/api/clinics/${selectedClinicId}/services`);
+        const data = await res.json();
+        if (active && data.services) {
+          setServices(data.services);
+        }
+      } catch (err) {
+        console.error('Failed to load clinic services:', err);
+      } finally {
+        if (active) setLoadingServices(false);
+      }
+    }
+
+    loadServices();
+    return () => {
+      active = false;
+    };
+  }, [selectedClinicId]);
+
+  const handleUpdateServiceField = (serviceId: string, field: keyof ClinicService, val: any) => {
+    setServices((prev) =>
+      prev.map((s) => (s.id === serviceId ? { ...s, [field]: val } : s))
+    );
+  };
+
+  const handleSaveService = async (service: ClinicService) => {
+    setServiceSaving(true);
+    setServiceSuccessMsg(null);
+    setError(null);
+    try {
+      const authToken = token || localStorage.getItem('bsch_staff_token') || '';
+      const res = await fetch(`/api/staff/cms/clinics/${selectedClinicId}/services`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          serviceId: service.id,
+          name: service.name,
+          requiredDocuments: service.requiredDocuments,
+          instructions: service.instructions,
+          maxDailyCapacity: service.maxDailyCapacity ?? null,
+          isActive: service.isActive,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'فشل في حفظ تفاصيل الخدمة');
+      }
+      setServiceSuccessMsg(`تم تحديث خدمة (${service.name}) بنجاح`);
+      setEditingServiceId(null);
+    } catch (err: any) {
+      setError(err.message || 'حدث خطأ أثناء حفظ الخدمة');
+    } finally {
+      setServiceSaving(false);
+    }
+  };
 
   const selectedClinic = clinics.find((c) => c.id === selectedClinicId);
 
@@ -388,6 +465,182 @@ export default function ClinicsPresentationEditor({
             </button>
           </div>
         </form>
+      )}
+
+      {/* Clinic Services Management Section */}
+      {selectedClinic && (
+        <div className="bg-white border border-[#E2E8EE] rounded-3xl p-6 shadow-xs space-y-5">
+          <div className="flex items-center justify-between pb-3 border-b border-[#F1F5F9]">
+            <div className="flex items-center gap-2">
+              <ListPlus className="w-5 h-5 text-[#087F78]" />
+              <div>
+                <h3 className="text-base font-bold text-[#163C3A]">
+                  خدمات عيادة ({selectedClinic.name}) والأوراق والتعليمات
+                </h3>
+                <p className="text-xs text-[#8493A6]">
+                  تظهر هذه الخدمات ديناميكياً للمرضى عند اختيار هذه العيادة في نموذج الحجز
+                </p>
+              </div>
+            </div>
+            <span className="text-xs font-semibold px-3 py-1 rounded-full bg-teal-50 text-[#087F78] border border-teal-200">
+              {services.length} خدمات مسجلة
+            </span>
+          </div>
+
+          {serviceSuccessMsg && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3 rounded-xl text-xs flex items-center gap-2">
+              <Check className="w-4 h-4 shrink-0" />
+              <span>{serviceSuccessMsg}</span>
+            </div>
+          )}
+
+          {loadingServices ? (
+            <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+              <RefreshCw className="w-4 h-4 animate-spin text-[#087F78]" />
+              <span>جاري تحميل الخدمات الطبية...</span>
+            </div>
+          ) : services.length === 0 ? (
+            <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+              لا توجد خدمات مخصصة حالياً لهذه العيادة. سيتم تطبيق التعليمات العامة للعيادة كإعداد افتراضي.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {services.map((srv) => {
+                const isEditing = editingServiceId === srv.id;
+                return (
+                  <div
+                    key={srv.id}
+                    className="p-4 rounded-2xl border border-slate-200 bg-slate-50/50 space-y-3"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm text-[#163C3A]">{srv.name}</span>
+                        <span className="text-[10.5px] font-mono text-slate-400">({srv.id})</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditingServiceId(isEditing ? null : srv.id)}
+                          className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-[#087F78] bg-white hover:bg-slate-50 transition-colors"
+                        >
+                          {isEditing ? 'إغلاق التعديل' : 'تعديل الأوراق والتعليمات'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {isEditing ? (
+                      <div className="space-y-3 pt-3 border-t border-slate-200 bg-white p-4 rounded-xl">
+                        <div>
+                          <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                            اسم الخدمة الطبية
+                          </label>
+                          <input
+                            type="text"
+                            value={srv.name}
+                            onChange={(e) => handleUpdateServiceField(srv.id, 'name', e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-900"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                            السعة اليومية القصوى للخدمة (اختياري - اتركه فارغاً للاعتماد على سعة العيادة)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={srv.maxDailyCapacity ?? ''}
+                            onChange={(e) =>
+                              handleUpdateServiceField(
+                                srv.id,
+                                'maxDailyCapacity',
+                                e.target.value ? Number(e.target.value) : undefined
+                              )
+                            }
+                            placeholder="سعة العيادة الإجمالية"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                            الأوراق والمستندات المطلوبة (كل سطر مستند)
+                          </label>
+                          <textarea
+                            rows={3}
+                            value={srv.requiredDocuments.join('\n')}
+                            onChange={(e) =>
+                              handleUpdateServiceField(
+                                srv.id,
+                                'requiredDocuments',
+                                e.target.value.split('\n').filter((l) => l.trim().length > 0)
+                              )
+                            }
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-900"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-[#163C3A] mb-1">
+                            تعليمات الخدمة والتحضير الطبي
+                          </label>
+                          <textarea
+                            rows={3}
+                            value={srv.instructions}
+                            onChange={(e) =>
+                              handleUpdateServiceField(srv.id, 'instructions', e.target.value)
+                            }
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-900"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2">
+                          <label className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={srv.isActive}
+                              onChange={(e) =>
+                                handleUpdateServiceField(srv.id, 'isActive', e.target.checked)
+                              }
+                              className="rounded border-slate-300 text-[#087F78]"
+                            />
+                            <span>الخدمة مفعلة ومتاحة للحجز</span>
+                          </label>
+
+                          <button
+                            type="button"
+                            disabled={serviceSaving}
+                            onClick={() => handleSaveService(srv)}
+                            className="px-5 py-2 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all shadow-xs disabled:opacity-50"
+                          >
+                            {serviceSaving ? 'جاري الحفظ...' : 'حفظ تعديلات الخدمة'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-600 space-y-1">
+                        <div className="flex items-start gap-1">
+                          <span className="font-bold text-slate-700">المستندات:</span>
+                          <span className="text-slate-600">
+                            {srv.requiredDocuments.length > 0
+                              ? srv.requiredDocuments.join(' • ')
+                              : 'أصل شهادة ميلاد الطفل أو بطاقة التأمين'}
+                          </span>
+                        </div>
+                        <div className="flex items-start gap-1">
+                          <span className="font-bold text-slate-700">التعليمات:</span>
+                          <span className="text-slate-600 line-clamp-2">
+                            {srv.instructions || 'الحضور صباحاً والتسجيل بأسبقية الحضور لشباك الاستقبال بالمستشفى.'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

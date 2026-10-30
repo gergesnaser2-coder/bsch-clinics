@@ -12,6 +12,30 @@ export interface StatusHistoryItem {
   updatedBy?: string;
 }
 
+export interface ClinicService {
+  id: string;
+  clinicId: string;
+  name: string;
+  requiredDocuments: string[];
+  instructions: string;
+  maxDailyCapacity?: number;
+  isActive: boolean;
+  displayOrder: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ClinicScheduleException {
+  id: string;
+  clinicId: string;
+  scheduleDate: string; // YYYY-MM-DD
+  maxCapacity?: number;
+  isClosed: boolean;
+  closureReason?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Clinic {
   id: string;
   name: string;
@@ -22,6 +46,8 @@ export interface Clinic {
   maxDailySlots: number;
   slotDurationMinutes: number;
   instructions?: string;
+  requiredDocuments?: string[];
+  services?: ClinicService[];
   isActive: boolean;
   isHospitalConfirmed?: boolean;
 }
@@ -41,10 +67,17 @@ export interface Appointment {
   referenceNumber: string; // e.g. BSCH-7492
   clinicId: string;
   clinicName: string;
+  serviceId?: string;
+  serviceName?: string;
   patientName: string;
   phoneNumber: string;
   patientAge?: string;
   patientAddress?: string;
+  guardianNationalId?: string;
+  bookingCode?: string; // One-time unhashed CSPRNG booking code returned only on creation
+  bookingCodeHash?: string;
+  requiredDocuments?: string[];
+  serviceInstructions?: string;
   appointmentDate: string; // YYYY-MM-DD
   appointmentTime: string; // HH:mm
   status: AppointmentStatus;
@@ -70,13 +103,18 @@ export interface StaffUser {
 
 export interface CreateAppointmentInput {
   clinicId: string;
+  serviceId?: string;
+  serviceName?: string;
   patientName: string;
   phoneNumber: string;
   patientAge?: string;
   patientAddress?: string;
+  guardianNationalId?: string;
+  notes?: string;
   appointmentDate: string;
   appointmentTime?: string;
   isWalkIn?: boolean;
+  staffUserId?: string;
 }
 
 export interface AuditLogItem {
