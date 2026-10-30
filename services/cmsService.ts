@@ -302,20 +302,26 @@ class CmsService {
   }
 
   public async getCmsDashboardData(): Promise<CmsFullPayload & { assets: MediaAsset[] }> {
+    let assets: MediaAsset[] = [...PRECONFIGURED_MEDIA_ASSETS, ...this.customAssets];
+
     if (isSupabaseConfigured()) {
       try {
         const supabase: any = createAdminClient();
-        const [settingsRes, sectionsRes, navRes, clinicsRes] = await Promise.all([
+        const [settingsRes, sectionsRes, navRes, clinicsRes, mediaRes] = await Promise.all([
           supabase.from('website_settings').select('*').eq('id', 'default').single(),
           supabase.from('homepage_sections').select('*').order('display_order', { ascending: true }),
           supabase.from('navigation_items').select('*').order('display_order', { ascending: true }),
           supabase.from('clinics').select('id, name, description, location, working_hours, display_order, is_featured_on_homepage, english_title, accent_color, icon_name, is_hospital_confirmed, is_active').order('display_order', { ascending: true }),
+          supabase.from('media_assets').select('*').order('created_at', { ascending: false }),
         ]);
 
         if (settingsRes.data) this.settings = settingsRes.data as unknown as WebsiteSettings;
         if (sectionsRes.data && sectionsRes.data.length > 0) this.sections = sectionsRes.data as unknown as HomepageSection[];
         if (navRes.data && navRes.data.length > 0) this.navigation = navRes.data as unknown as NavigationItem[];
         if (clinicsRes.data && clinicsRes.data.length > 0) this.clinicsPresentation = clinicsRes.data as unknown as ClinicPresentation[];
+        if (mediaRes.data && mediaRes.data.length > 0) {
+          assets = mediaRes.data as unknown as MediaAsset[];
+        }
       } catch (err) {
         console.warn('Supabase getCmsDashboardData fallback:', err);
       }
@@ -326,7 +332,7 @@ class CmsService {
       sections: this.sections,
       navigation: this.navigation,
       clinics: this.clinicsPresentation,
-      assets: [...PRECONFIGURED_MEDIA_ASSETS, ...this.customAssets],
+      assets,
     };
   }
 

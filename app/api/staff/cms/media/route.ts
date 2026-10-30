@@ -67,6 +67,28 @@ export async function POST(req: NextRequest) {
         created_at: new Date().toISOString(),
       };
 
+      if (isSupabaseConfigured()) {
+        try {
+          const supabase = createAdminClient();
+          await (supabase.from('media_assets') as any).upsert({
+            id: asset.id,
+            name: asset.name,
+            url: asset.url,
+            mime_type: asset.mime_type,
+            size_bytes: asset.size_bytes || 0,
+            alt_text: asset.alt_text || null,
+            storage_path: null,
+            bucket_id: null,
+            is_custom: true,
+            created_at: asset.created_at,
+            updated_at: new Date().toISOString(),
+            created_by: staffUser.username || staffUser.name || 'admin',
+          });
+        } catch (dbErr) {
+          console.warn('Failed to persist registered media asset in Supabase:', dbErr);
+        }
+      }
+
       cmsService.registerCustomAsset(asset);
       return NextResponse.json({ success: true, asset, message: 'تم تسجيل الصورة في المكتبة بنجاح' });
     }
@@ -148,6 +170,28 @@ export async function POST(req: NextRequest) {
       alt_text: customAlt || customName || file.name,
       created_at: new Date().toISOString(),
     };
+
+    if (isSupabaseConfigured()) {
+      try {
+        const supabase = createAdminClient();
+        await (supabase.from('media_assets') as any).upsert({
+          id: asset.id,
+          name: asset.name,
+          url: asset.url,
+          mime_type: asset.mime_type,
+          size_bytes: asset.size_bytes || 0,
+          alt_text: asset.alt_text || null,
+          storage_path: `uploads/${uniqueFilename}`,
+          bucket_id: publicUrl.includes('public-cms-assets') ? 'public-cms-assets' : null,
+          is_custom: true,
+          created_at: asset.created_at,
+          updated_at: new Date().toISOString(),
+          created_by: staffUser.username || staffUser.name || 'admin',
+        });
+      } catch (dbErr) {
+        console.warn('Failed to persist uploaded media asset in Supabase:', dbErr);
+      }
+    }
 
     cmsService.registerCustomAsset(asset);
 
