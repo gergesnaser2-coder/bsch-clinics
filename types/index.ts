@@ -87,6 +87,7 @@ export interface Appointment {
   queueNumber?: number;
   lastCalledAt?: string;
   calledCount?: number;
+  isVerified?: boolean;
   statusHistory: StatusHistoryItem[];
 }
 

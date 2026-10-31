@@ -80,22 +80,40 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
+-- Audit and update CHECK constraint on appointments.reference_number to support up to 10 digits
+DO $$ BEGIN
+  ALTER TABLE public.appointments DROP CONSTRAINT IF EXISTS chk_reference_number;
+  ALTER TABLE public.appointments
+    ADD CONSTRAINT chk_reference_number
+    CHECK (reference_number ~ '^BSCH-[0-9]{4,10}$');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
 -- Sequence for concurrent, collision-free appointment reference numbers
 CREATE SEQUENCE IF NOT EXISTS public.seq_appointment_reference_number
   START WITH 1000
   INCREMENT BY 1;
 
--- Synchronize sequence with highest existing numeric reference number in appointments
+-- Synchronize sequence safely: only advance forward, NEVER rollback or setval backwards
 DO $$
 DECLARE
   v_max_ref BIGINT;
+  v_curr_seq BIGINT;
 BEGIN
+  -- Calculate max numeric reference number present in appointments
   SELECT COALESCE(MAX(SUBSTRING(reference_number FROM '^BSCH-([0-9]+)$')::BIGINT), 999)
   INTO v_max_ref
   FROM public.appointments
   WHERE reference_number ~ '^BSCH-[0-9]+$';
 
-  IF v_max_ref >= 1000 THEN
+  -- Safely check current sequence last_value
+  SELECT last_value INTO v_curr_seq
+  FROM pg_sequences
+  WHERE schemaname = 'public' AND sequencename = 'seq_appointment_reference_number';
+
+  -- Only advance forward if max existing reference exceeds current sequence position
+  IF v_max_ref > COALESCE(v_curr_seq, 999) THEN
     PERFORM setval('public.seq_appointment_reference_number', v_max_ref, true);
   END IF;
 END $$;
@@ -109,18 +127,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_apt_per_phone_patient_clinic
   ON public.appointments (clinic_id, phone_number, lower(regexp_replace(trim(patient_name), '\s+', ' ', 'g')), appointment_date)
   WHERE (status != 'CANCELLED');
 
--- Safely verify new index creation before dropping old index
+-- Safely verify new index creation via pg_index before dropping old index
 DO $$
+DECLARE
+  v_is_valid BOOLEAN := false;
+  v_indexdef TEXT;
 BEGIN
-  IF EXISTS (
-    SELECT 1 FROM pg_indexes 
-    WHERE schemaname = 'public' 
-      AND tablename = 'appointments' 
-      AND indexname = 'idx_unique_active_apt_per_phone_patient_clinic_day'
-  ) THEN
+  -- Deep inspection of pg_index and index definition
+  SELECT (i.indisvalid AND i.indisready AND i.indisunique),
+         pg_get_indexdef(c.oid)
+  INTO v_is_valid, v_indexdef
+  FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public'
+    AND c.relname = 'idx_unique_active_apt_per_phone_patient_clinic_day';
+
+  -- Verify validity, readiness, uniqueness, patient_name expression, and cancellation predicate
+  IF v_is_valid = true 
+     AND v_indexdef ILIKE '%patient_name%'
+     AND v_indexdef ILIKE '%regexp_replace%'
+     AND (v_indexdef ILIKE '%status%CANCELLED%' OR v_indexdef ILIKE '%status <> ''CANCELLED''%' OR v_indexdef ILIKE '%status != ''CANCELLED''%')
+  THEN
     DROP INDEX IF EXISTS public.idx_unique_active_apt_per_phone_clinic_day;
   ELSE
-    RAISE EXCEPTION 'Safety check failed: idx_unique_active_apt_per_phone_patient_clinic_day was not created. Preserving old index.';
+    RAISE WARNING 'Safety check: New index idx_unique_active_apt_per_phone_patient_clinic_day is not fully valid or does not match required expressions. Preserving old index.';
   END IF;
 END $$;
 
@@ -263,6 +294,7 @@ DECLARE
   v_retries INTEGER := 0;
   v_today_cairo DATE := (timezone('Africa/Cairo', now()))::date;
   v_next_val BIGINT;
+  v_constraint_name TEXT;
 BEGIN
   -- 1. Clean & validate inputs
   v_clean_phone := regexp_replace(trim(COALESCE(p_phone_number, '')), '\s+', '', 'g');
@@ -399,6 +431,13 @@ BEGIN
   -- 9. Determine initial status & staff identity strictly
   -- Verify server-supplied p_staff_user_id or auth.uid() against active staff profiles
   IF p_staff_user_id IS NOT NULL THEN
+    -- If invoked directly through PostgREST (not service_role), require auth.uid() match
+    IF current_user != 'service_role' AND COALESCE(current_setting('request.jwt.claim.role', true), '') != 'service_role' THEN
+      IF auth.uid() IS NULL OR auth.uid() != p_staff_user_id THEN
+        RETURN jsonb_build_object('success', false, 'error', 'غير مصرح: لا يمكن تحديد هوية موظف مختلفة عن الجلسة الموثقة.');
+      END IF;
+    END IF;
+
     SELECT id, full_name, role, clinic_id INTO v_staff_record
     FROM public.staff_profiles
     WHERE id = p_staff_user_id AND is_active = true;
@@ -440,14 +479,11 @@ BEGIN
     v_initial_status := 'PENDING_REVIEW';
   END IF;
 
-  -- 10. Dedicated sequence for concurrent reference numbers with retry safety
-  v_ref := trim(COALESCE(p_reference_number, ''));
-  IF v_ref = '' OR v_ref !~ '^BSCH-[0-9]{4,8}$' OR EXISTS (SELECT 1 FROM public.appointments WHERE reference_number = v_ref) THEN
-    v_next_val := nextval('public.seq_appointment_reference_number');
-    v_ref := 'BSCH-' || CASE WHEN v_next_val < 10000 THEN lpad(v_next_val::text, 4, '0') ELSE v_next_val::text END;
-  END IF;
+  -- 10. Dedicated sequence for concurrent reference numbers (strictly database-generated)
+  v_next_val := nextval('public.seq_appointment_reference_number');
+  v_ref := 'BSCH-' || CASE WHEN v_next_val < 10000 THEN lpad(v_next_val::text, 4, '0') ELSE v_next_val::text END;
 
-  -- 11. Insert record with concurrency collision retry loop
+  -- 11. Insert record with concurrency collision retry loop and constraint discrimination
   LOOP
     BEGIN
       INSERT INTO public.appointments (
@@ -485,12 +521,25 @@ BEGIN
 
       EXIT; -- Insert succeeded
     EXCEPTION WHEN unique_violation THEN
-      v_retries := v_retries + 1;
-      IF v_retries > 5 THEN
-        RETURN jsonb_build_object('success', false, 'error', 'تعذر توليد رقم مرجعي فريد في الوقت الحالي. يرجى المحاولة مرة أخرى.');
+      GET STACKED DIAGNOSTICS v_constraint_name = CONSTRAINT_NAME;
+
+      -- Discriminate between reference number collision and duplicate booking violation
+      IF v_constraint_name = 'appointments_reference_number_key' 
+         OR v_constraint_name = 'idx_appointments_ref' 
+         OR v_constraint_name LIKE '%reference_number%' 
+         OR v_constraint_name LIKE '%ref%' THEN
+        v_retries := v_retries + 1;
+        IF v_retries > 5 THEN
+          RETURN jsonb_build_object('success', false, 'error', 'تعذر توليد رقم مرجعي فريد في الوقت الحالي. يرجى المحاولة مرة أخرى.');
+        END IF;
+        v_next_val := nextval('public.seq_appointment_reference_number');
+        v_ref := 'BSCH-' || CASE WHEN v_next_val < 10000 THEN lpad(v_next_val::text, 4, '0') ELSE v_next_val::text END;
+      ELSIF v_constraint_name = 'idx_unique_active_apt_per_phone_patient_clinic_day' 
+         OR v_constraint_name = 'idx_unique_active_apt_per_phone_clinic_day' THEN
+        RETURN jsonb_build_object('success', false, 'error', 'يوجد حجز نشط مسبقاً بنفس رقم الهاتف لنفس المريض في هذه العيادة في هذا اليوم.');
+      ELSE
+        RETURN jsonb_build_object('success', false, 'error', 'يوجد تعارض مع حجز مسجل مسبقاً (' || COALESCE(v_constraint_name, 'unique violation') || ').');
       END IF;
-      v_next_val := nextval('public.seq_appointment_reference_number');
-      v_ref := 'BSCH-' || CASE WHEN v_next_val < 10000 THEN lpad(v_next_val::text, 4, '0') ELSE v_next_val::text END;
     END;
   END LOOP;
 

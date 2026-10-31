@@ -763,4 +763,88 @@ test('Security 24: Timezone Parity - book_appointment_atomic and track_appointme
   assert.ok(content.includes("(timezone('Africa/Cairo', now()))::date"), 'Migration must strictly evaluate current date in Africa/Cairo timezone');
 });
 
+test('Security 25: Staff Identity & Clinic Confinement - Public booking routes strictly ignore client-supplied staffUserId, walk-in routes only pass verified session staffUser.id', async () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  // Verify staff verification inside RPC
+  assert.ok(content.includes('SELECT id, full_name, role, clinic_id INTO v_staff_record'), 'RPC must query staff_profiles for caller identity');
+  assert.ok(content.includes('v_staff_record.role = \'RECEPTIONIST\' AND v_staff_record.clinic_id IS NOT NULL AND v_staff_record.clinic_id != p_clinic_id'), 'RPC must confine receptionist to assigned clinic');
+
+  // Verify public booking service call never passes staffUserId unless isWalkIn
+  const appointmentServicePath = path.join(process.cwd(), 'services', 'appointmentService.ts');
+  const svcContent = fs.readFileSync(appointmentServicePath, 'utf8');
+  assert.ok(svcContent.includes('p_staff_user_id: input.isWalkIn ? (input.staffUserId || null) : null'), 'Non-walk-in bookings must never pass staffUserId to RPC');
+});
+
+test('Security 26: Patient Tracking Privacy & Ownership Verification - Phone-only queries return strictly redacted child names and masked reference numbers', async () => {
+  const trackRoutePath = path.join(process.cwd(), 'app', 'api', 'appointments', 'track', 'route.ts');
+  const trackContent = fs.readFileSync(trackRoutePath, 'utf8');
+
+  // Verify data minimization when isThisVerified is false
+  assert.ok(trackContent.includes('[بيانات الطفل محجوبة لحماية الخصوصية]'), 'Phone-only queries must completely redact child names');
+  assert.ok(trackContent.includes('BSCH-****'), 'Phone-only queries must mask reference numbers');
+  assert.ok(trackContent.includes('isCallerVerified'), 'API route must check caller verification status');
+});
+
+test('Security 27: Deep Index Inspection - Migration verifies indisvalid, indisready, indisunique, patient_name expression, and cancellation predicate before dropping old index', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes('(i.indisvalid AND i.indisready AND i.indisunique)'), 'Migration must verify index validity, readiness, and uniqueness from pg_index');
+  assert.ok(content.includes('pg_get_indexdef(c.oid)'), 'Migration must inspect index expression definition');
+  assert.ok(content.includes('DROP INDEX IF EXISTS public.idx_unique_active_apt_per_phone_clinic_day'), 'Migration drops old index only after verification');
+  assert.ok(content.includes('Preserving old index'), 'Migration preserves old index if verification fails');
+});
+
+test('Security 28: Sequence Rollback Protection - Sequence sync queries pg_sequences and only advances forward', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes('FROM pg_sequences'), 'Migration must query current sequence position from pg_sequences');
+  assert.ok(content.includes('IF v_max_ref > COALESCE(v_curr_seq, 999) THEN'), 'Sequence setval must ONLY be performed if max reference exceeds current sequence position');
+});
+
+test('Security 29: Reference Number Constraints & Internal Generation - CHECK constraint updated to ^BSCH-[0-9]{4,10}$ and internal DB sequence generation', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes('CHECK (reference_number ~ \'^BSCH-[0-9]{4,10}$\')'), 'CHECK constraint must support 4 to 10 digits for scalability');
+  assert.ok(content.includes("v_next_val := nextval('public.seq_appointment_reference_number');"), 'book_appointment_atomic must generate reference strictly from database sequence');
+});
+
+test('Security 30: Unique Constraint Violation Discrimination - Distinguishes reference collisions from duplicate booking violations', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes('GET STACKED DIAGNOSTICS v_constraint_name = CONSTRAINT_NAME;'), 'RPC must use GET STACKED DIAGNOSTICS to capture failing constraint');
+  assert.ok(content.includes('idx_unique_active_apt_per_phone_patient_clinic_day'), 'RPC must identify duplicate patient booking violation specifically');
+  assert.ok(content.includes('يوجد حجز نشط مسبقاً بنفس رقم الهاتف لنفس المريض في هذه العيادة في هذا اليوم.'), 'RPC must return duplicate reservation message immediately without looping');
+});
+
+test('Security 31: Advisory Locking Concurrency - book_appointment_atomic acquires advisory transaction lock per clinic and date', () => {
+  const migrationPath = path.join(process.cwd(), 'supabase', 'migrations', '20261101020000_clinic_services_capacity_and_schedules.sql');
+  const content = fs.readFileSync(migrationPath, 'utf8');
+
+  assert.ok(content.includes("pg_advisory_xact_lock(hashtext('booking_' || p_clinic_id || '_' || p_appointment_date::text))"), 'RPC must acquire transactional advisory lock on clinic and date');
+});
+
+test('Security 32: Rate Limiting Safety - Keys are server-derived, limits are constants, and fail-closed in production', async () => {
+  const { checkRateLimit, checkIpRateLimit, OTP_CONFIG } = await import('./otp.ts');
+
+  assert.equal(OTP_CONFIG.MAX_IP_REQUESTS, 15, 'IP limit must be hardcoded server constant');
+  assert.equal(OTP_CONFIG.IP_WINDOW_MS, 600000, 'IP window must be 10 minutes');
+
+  // Verify production fail-closed behavior
+  const prevEnv = process.env.NODE_ENV;
+  try {
+    (process.env as any).NODE_ENV = 'production';
+    const prodRes = await checkRateLimit('test_audit_key', 5, 60);
+    assert.equal(prodRes.allowed, false, 'Rate limit must fail closed in production when Supabase is unconfigured');
+    assert.equal(prodRes.retryAfterSeconds, 60);
+  } finally {
+    (process.env as any).NODE_ENV = prevEnv;
+  }
+});
+
 

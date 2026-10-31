@@ -36,13 +36,20 @@ import { formatArabicDate } from '@/lib/rules';
 function TrackContent() {
   const searchParams = useSearchParams();
   const initialPhone = searchParams.get('phone') || '';
+  const initialRef = searchParams.get('ref') || searchParams.get('referenceNumber') || '';
 
   const [phoneQuery, setPhoneQuery] = useState(initialPhone);
+  const [refQuery, setRefQuery] = useState(initialRef);
   const [turnstileToken, setTurnstileToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Unlock state for unverified bookings
+  const [unlockRefInput, setUnlockRefInput] = useState('');
+  const [unlockLoading, setUnlockLoading] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
 
   // Selected booking for receipt view
   const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null);
@@ -74,6 +81,7 @@ function TrackContent() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phone: cleanPhone,
+          referenceNumber: refQuery.trim() || undefined,
           turnstileToken,
         }),
       });
@@ -96,6 +104,51 @@ function TrackContent() {
       setAppointments([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Handle inline reference unlocking
+  async function handleUnlockTicket(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanPhone = phoneQuery.trim();
+    const cleanRef = unlockRefInput.trim();
+
+    if (!cleanRef) {
+      setUnlockError('يرجى إدخال الرقم المرجعي للحجز');
+      return;
+    }
+
+    setUnlockLoading(true);
+    setUnlockError(null);
+
+    try {
+      const res = await fetch('/api/appointments/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: cleanPhone,
+          referenceNumber: cleanRef,
+          turnstileToken,
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setUnlockError(data.error || 'تعذر التحقق من الرقم المرجعي');
+      } else {
+        const fetched: Appointment[] = data.appointments || [];
+        setAppointments(fetched);
+        const unlocked = fetched.find((a) => a.isVerified) || fetched[0];
+        if (unlocked) {
+          setSelectedAppointment(unlocked);
+          setRefQuery(cleanRef);
+          setUnlockRefInput('');
+        }
+      }
+    } catch {
+      setUnlockError('حدث خطأ أثناء الاتصال بالخادم');
+    } finally {
+      setUnlockLoading(false);
     }
   }
 
@@ -269,6 +322,25 @@ function TrackContent() {
             </span>
           </div>
 
+          <div>
+            <label className="block text-xs sm:text-sm font-bold text-[#163C3A] mb-1.5">
+              الرقم المرجعي للحجز (اختياري)
+            </label>
+            <div className="relative">
+              <input
+                type="text"
+                dir="ltr"
+                value={refQuery}
+                onChange={(e) => setRefQuery(e.target.value)}
+                placeholder="BSCH-1001"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:border-[#087F78] focus:ring-2 focus:ring-[#087F78]/15 text-xs sm:text-sm text-[#163C3A] text-right font-mono font-bold placeholder:text-slate-400 transition-all bg-white"
+              />
+            </div>
+            <span className="block text-[10.5px] text-slate-400 mt-1">
+              أدخل الرقم المرجعي إذا كنت ترغب في فك حجب بيانات التذكرة، رقم الدور، أو إلغاء الحجز مباشرة
+            </span>
+          </div>
+
           {errorMessage && (
             <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
@@ -403,6 +475,57 @@ function TrackContent() {
               {/* RECEIPT VIEW */}
               {selectedAppointment && (
                 <div className="mt-8 max-w-2xl mx-auto pt-6 border-t border-slate-200 animate-in fade-in slide-in-from-bottom-3 duration-200">
+                  {selectedAppointment.isVerified === false && (
+                    <div className="bg-teal-50/80 border border-teal-200 rounded-3xl p-5 sm:p-6 text-right shadow-2xs mb-6 space-y-3">
+                      <div className="flex items-start gap-3">
+                        <Lock className="w-5 h-5 text-[#087F78] shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="text-sm sm:text-base font-bold text-[#124E4A] mb-1">
+                            بيانات التذكرة ورقم الدور محمية لحماية خصوصية وسرية الطفل
+                          </h4>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            تم استرجاع موعد الحجز برقم الهاتف فقط. للاطلاع على كامل بيانات التذكرة، رقم الدور، إمكانية الطباعة، أو إلغاء الحجز، يرجى إدخال الرقم المرجعي للحجز المسلم إليكم أثناء الحجز (مثال: BSCH-1001).
+                          </p>
+                        </div>
+                      </div>
+
+                      <form onSubmit={handleUnlockTicket} className="flex flex-col sm:flex-row items-center gap-3 pt-2">
+                        <input
+                          type="text"
+                          dir="ltr"
+                          value={unlockRefInput}
+                          onChange={(e) => setUnlockRefInput(e.target.value)}
+                          placeholder="BSCH-1001"
+                          className="w-full sm:flex-1 px-4 py-2.5 rounded-xl border border-teal-200 focus:border-[#087F78] focus:ring-2 focus:ring-[#087F78]/15 text-xs sm:text-sm text-slate-800 text-center font-mono font-bold bg-white"
+                        />
+                        <button
+                          type="submit"
+                          disabled={unlockLoading}
+                          className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all shadow-xs disabled:opacity-60 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          {unlockLoading ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              <span>جاري التحقق...</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldCheck className="w-4 h-4" />
+                              <span>فك حجب التذكرة</span>
+                            </>
+                          )}
+                        </button>
+                      </form>
+
+                      {unlockError && (
+                        <p className="text-xs text-red-600 font-bold flex items-center gap-1.5">
+                          <AlertCircle className="w-3.5 h-3.5 text-red-500" />
+                          <span>{unlockError}</span>
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between mb-4">
                     <div>
                       <h3 className="text-lg font-bold text-[#124E4A]">
@@ -416,7 +539,8 @@ function TrackContent() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={handlePrint}
-                        className="px-3.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                        disabled={selectedAppointment.isVerified === false}
+                        className="px-3.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Printer className="w-3.5 h-3.5" />
                         <span>طباعة</span>
@@ -424,8 +548,8 @@ function TrackContent() {
 
                       <button
                         onClick={handleSaveAsImage}
-                        disabled={generatingImage}
-                        className="px-3.5 py-1.5 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                        disabled={generatingImage || selectedAppointment.isVerified === false}
+                        className="px-3.5 py-1.5 rounded-xl bg-[#087F78] hover:bg-[#066560] text-white text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         {generatingImage ? (
                           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -524,17 +648,19 @@ function TrackContent() {
                   </div>
 
                   {/* Cancel Appointment Button */}
-                  <div className="mt-4 flex items-center justify-between text-xs pt-3 border-t border-slate-100">
-                    <span className="text-slate-400">هل ترغب في الاعتذار عن الموعد؟</span>
-                    <button
-                      type="button"
-                      onClick={() => setCancellingAptId(selectedAppointment.id || selectedAppointment.referenceNumber)}
-                      className="text-red-600 hover:text-red-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
-                    >
-                      <XCircle className="w-4 h-4" />
-                      <span>إلغاء هذا الحجز</span>
-                    </button>
-                  </div>
+                  {selectedAppointment.isVerified !== false && (
+                    <div className="mt-4 flex items-center justify-between text-xs pt-3 border-t border-slate-100">
+                      <span className="text-slate-400">هل ترغب في الاعتذار عن الموعد؟</span>
+                      <button
+                        type="button"
+                        onClick={() => setCancellingAptId(selectedAppointment.id || selectedAppointment.referenceNumber)}
+                        className="text-red-600 hover:text-red-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                      >
+                        <XCircle className="w-4 h-4" />
+                        <span>إلغاء هذا الحجز</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </>

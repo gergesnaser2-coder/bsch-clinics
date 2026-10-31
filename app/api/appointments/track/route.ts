@@ -1,30 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appointmentStore } from '@/services/appointmentService';
 import { normalizeAndValidateEgyptianPhone, maskPatientName } from '@/lib/rules';
-import { checkIpRateLimit, checkRateLimit } from '@/lib/otp';
+import { checkIpRateLimit, checkRateLimit, verifyOtp } from '@/lib/otp';
 import { verifyTurnstileToken } from '@/lib/turnstile';
 
 /**
  * POST /api/appointments/track
- * Client Confirmed Requirement: Phone-Only Tracking
+ * Client Confirmed Requirement: Phone-Only Tracking with Robust Data Minimization & Ownership Verification
  *
  * Privacy & Security Invariants:
- * 1. Look up appointments by Egyptian guardian phone number only (No SMS OTP or secret booking code required).
- * 2. Prevent automated scraping & enumeration attacks:
+ * 1. Look up appointments by Egyptian guardian phone number.
+ * 2. If queried by phone alone (without matching reference number or OTP):
+ *    - STAGE 1: Returns a high-level summary list (clinic, service, date, status, guidance).
+ *    - COMPLETELY REDACTS child's name ("[بيانات الطفل محجوبة لحماية الخصوصية]").
+ *    - Masks reference number ("BSCH-****") and omits queue number.
+ *    - Never exposes National ID, address, age, physician internal notes, or database UUIDs.
+ * 3. If caller provides matching reference number or valid OTP:
+ *    - STAGE 2: Unlocks full ticket receipt (masked name "أحمد ك*** م***", reference number, queue number, cancellation).
+ * 4. Bot & Abuse Mitigation:
  *    - Cloudflare Turnstile bot verification (fail-secure in production).
  *    - Persistent IP rate limiting (15 requests / 10 minutes).
  *    - Persistent Phone rate limiting (8 requests / 10 minutes per phone).
- * 3. Extreme Data Minimization:
- *    - Child's name is partially redacted (e.g. "أحمد ك*** م***").
- *    - NEVER exposes National ID, address, age, physician internal notes, or database UUIDs.
- *    - Never exposes user-facing clock time (only attendance date + priority queue guidance).
- * 4. Uniform behavior: Returns empty list gracefully if no active bookings exist.
+ * 5. Uniform behavior: Returns empty list gracefully if no active bookings exist.
  */
 export async function POST(req: NextRequest) {
   const startTime = Date.now();
   try {
     const body = await req.json().catch(() => ({}));
     const phone = (body.phone || body.phoneNumber || '').toString().trim();
+    const referenceNumber = (body.referenceNumber || body.ref || '').toString().trim().toUpperCase();
+    const otpCode = (body.otp || body.code || '').toString().trim();
     const turnstileToken = body.turnstileToken || body.token || '';
 
     // 1. Validate Egyptian phone format
@@ -85,26 +90,54 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // 5.1 Verification Check: Does the caller have proof of ownership?
+    // Option A: Reference number matches an active appointment for this phone
+    // Option B: Valid OTP code verified for this phone
+    let isCallerVerified = false;
+    if (referenceNumber) {
+      isCallerVerified = appointments.some(
+        (a) => a.referenceNumber.toUpperCase() === referenceNumber
+      );
+    }
+    if (!isCallerVerified && otpCode) {
+      const otpCheck = await verifyOtp(normalizedPhone, otpCode);
+      if (otpCheck.valid) {
+        isCallerVerified = true;
+      }
+    }
+
     // 6. Strict Data Minimization on response payload
-    const sanitizedAppointments = appointments.map((a) => ({
-      referenceNumber: a.referenceNumber,
-      clinicId: a.clinicId,
-      clinicName: a.clinicName,
-      serviceId: a.serviceId,
-      serviceName: a.serviceName || 'كشف واستشارة طبية',
-      patientName: maskPatientName(a.patientName),
-      appointmentDate: a.appointmentDate,
-      attendanceGuidance: 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال بالمستشفى',
-      status: a.status,
-      queueNumber: a.queueNumber,
-      requiredDocuments: a.requiredDocuments || [],
-      serviceInstructions: a.serviceInstructions || '',
-    }));
+    // If NOT verified by referenceNumber or OTP:
+    // Redact child's name COMPLETELY, mask referenceNumber, omit queue number!
+    const sanitizedAppointments = appointments.map((a) => {
+      const isThisVerified = isCallerVerified && (!referenceNumber || a.referenceNumber.toUpperCase() === referenceNumber);
+
+      return {
+        id: isThisVerified ? a.id : undefined,
+        referenceNumber: isThisVerified ? a.referenceNumber : 'BSCH-****',
+        clinicId: a.clinicId,
+        clinicName: a.clinicName,
+        serviceId: a.serviceId,
+        serviceName: a.serviceName || 'كشف واستشارة طبية',
+        patientName: isThisVerified ? maskPatientName(a.patientName) : '[بيانات الطفل محجوبة لحماية الخصوصية]',
+        appointmentDate: a.appointmentDate,
+        attendanceGuidance: 'الحضور صباحاً بأسبقية التسجيل في شباك الاستقبال بالمستشفى',
+        status: a.status,
+        queueNumber: isThisVerified ? a.queueNumber : undefined,
+        requiredDocuments: a.requiredDocuments || [],
+        serviceInstructions: a.serviceInstructions || '',
+        isVerified: isThisVerified,
+      };
+    });
 
     return NextResponse.json({
       success: true,
       count: sanitizedAppointments.length,
+      isVerified: isCallerVerified,
       appointments: sanitizedAppointments,
+      message: isCallerVerified
+        ? undefined
+        : 'تم عرض ملخص المواعيد. للاطلاع على كامل تفاصيل التذكرة ورقم الدور أو إلغاء الحجز، يرجى إدخال الرقم المرجعي للحجز المسجل لديكم.',
     });
   } catch (error) {
     console.error('Error in /api/appointments/track POST handler:', error);

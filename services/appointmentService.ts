@@ -1165,10 +1165,10 @@ class AppointmentServiceStore {
           p_patient_address: input.patientAddress?.trim() || null,
           p_appointment_date: input.appointmentDate,
           p_appointment_time: selectedTime || '09:00',
-          p_reference_number: ref,
+          p_reference_number: null, // Strictly server/database-generated sequence
           p_service_id: matchedService?.id || null,
           p_guardian_national_id: input.guardianNationalId?.trim() || null,
-          p_staff_user_id: input.staffUserId || null,
+          p_staff_user_id: input.isWalkIn ? (input.staffUserId || null) : null,
         });
 
         if (error) {
