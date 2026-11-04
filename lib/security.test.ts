@@ -375,22 +375,54 @@ test('Security 8: Seed data re-run resilience - Confirmed clinics preserve hospi
 
 test('Security 9: Staff Authentication - Validates credentials and maps to safe StaffUser without exposing passwords', async () => {
   AuthService._resetMockSessionsForTesting();
+  AuthService._setMockUsersForTesting([
+    {
+      id: 'mock-admin-1',
+      username: 'admin',
+      name: 'مدير النظام (حساب اختبار)',
+      role: 'ADMIN',
+      password: 'TestAdminPass2026',
+      active: true,
+    },
+    {
+      id: 'mock-rec-1',
+      username: 'reception',
+      name: 'موظف الاستقبال (حساب اختبار)',
+      role: 'RECEPTIONIST',
+      clinicId: 'echo',
+      password: 'TestReceptionPass2026',
+      active: true,
+    },
+  ]);
 
   // Invalid credentials
   const invalidSession = await AuthService.validateCredentials('admin', 'wrong_pass');
   assert.equal(invalidSession, null, 'Invalid password must return null');
 
   // Valid credentials
-  const validSession = await AuthService.validateCredentials('admin', 'admin2026');
+  const validSession = await AuthService.validateCredentials('admin', 'TestAdminPass2026');
   assert.ok(validSession, 'Valid credentials must yield an AuthSession');
   assert.ok(validSession.token, 'Session must contain a token');
   assert.equal(validSession.user.role, 'ADMIN', 'Role must map to ADMIN');
   assert.equal((validSession.user as any).passwordHash, undefined, 'Password hash must never be in user object');
+  assert.equal((validSession.user as any).password, undefined, 'Plaintext password must never be in user object');
 });
 
 test('Security 10: Staff Authentication - verifySession authenticates active token and rejects invalid/revoked tokens', async () => {
   AuthService._resetMockSessionsForTesting();
-  const session = await AuthService.validateCredentials('reception', 'bsch2026');
+  AuthService._setMockUsersForTesting([
+    {
+      id: 'mock-rec-1',
+      username: 'reception',
+      name: 'موظف الاستقبال (حساب اختبار)',
+      role: 'RECEPTIONIST',
+      clinicId: 'echo',
+      password: 'TestReceptionPass2026',
+      active: true,
+    },
+  ]);
+
+  const session = await AuthService.validateCredentials('reception', 'TestReceptionPass2026');
   assert.ok(session);
 
   // Valid token verification
@@ -418,7 +450,7 @@ test('Security 11: Staff Authentication - Production mode forbids in-memory staf
 
     await assert.rejects(
       async () => {
-        await AuthService.validateCredentials('admin', 'admin2026');
+        await AuthService.validateCredentials('admin', 'TestAdminPass2026');
       },
       /قاعدة بيانات الإنتاج غير مهيأة|تسجيل الدخول غير متاح/,
       'Must reject in-memory login in production when Supabase is unconfigured'

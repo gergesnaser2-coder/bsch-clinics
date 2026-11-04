@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AuthService } from '@/services/authService';
+import { STAFF_SESSION_COOKIE } from '@/lib/auth/token';
 
 export async function POST(req: NextRequest) {
   try {
@@ -8,9 +9,30 @@ export async function POST(req: NextRequest) {
     if (token) {
       await AuthService.revokeSession(token);
     }
-    return NextResponse.json({ success: true });
+
+    const response = NextResponse.json({ success: true });
+    response.cookies.set({
+      name: STAFF_SESSION_COOKIE,
+      value: '',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 0,
+    });
+    return response;
   } catch (error) {
     console.error('Logout error:', error);
-    return NextResponse.json({ success: true });
+    const response = NextResponse.json({ success: true });
+    response.cookies.set({
+      name: STAFF_SESSION_COOKIE,
+      value: '',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 0,
+    });
+    return response;
   }
 }

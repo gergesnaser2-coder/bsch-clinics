@@ -1,23 +1,23 @@
 'use client';
 
-import React, { useState, useSyncExternalStore } from 'react';
+import React, { useState, useSyncExternalStore, Suspense } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ShieldCheck,
   ArrowRight,
   AlertCircle,
-  UserCheck,
-  Stethoscope,
-  ShieldAlert,
   Home,
+  KeyRound,
 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 
 const emptySubscribe = () => () => {};
 
-export default function StaffLoginPage() {
+function StaffLoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const mounted = useSyncExternalStore(
     emptySubscribe,
     () => true,
@@ -28,11 +28,8 @@ export default function StaffLoginPage() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function handleLogin(u?: string, p?: string) {
-    const userToLogin = u || username;
-    const passToLogin = p || password;
-
-    if (!userToLogin || !passToLogin) {
+  async function handleLogin() {
+    if (!username || !password) {
       setErrorMessage('يرجى إدخال اسم المستخدم وكلمة المرور');
       return;
     }
@@ -44,10 +41,7 @@ export default function StaffLoginPage() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: userToLogin,
-          password: passToLogin,
-        }),
+        body: JSON.stringify({ username, password }),
       });
 
       const data = await res.json();
@@ -57,7 +51,25 @@ export default function StaffLoginPage() {
       } else {
         localStorage.setItem('bsch_staff_token', data.token);
         localStorage.setItem('bsch_staff_user', JSON.stringify(data.user));
-        router.push('/staff/dashboard');
+
+        // Best-effort: establish a real Supabase Auth session in the browser so the
+        // staff member can change their password with supabase.auth.updateUser later.
+        if (data.supabaseEmail) {
+          try {
+            const supabase = createClient();
+            await supabase.auth.signInWithPassword({
+              email: data.supabaseEmail,
+              password,
+            });
+          } catch {
+            // Server-side session is already established; ignore client-session failure.
+          }
+        }
+
+        const next = searchParams.get('next');
+        router.replace(
+          next && next.startsWith('/staff') ? next : '/staff/dashboard'
+        );
       }
     } catch (err) {
       console.error('Login error:', err);
@@ -65,12 +77,6 @@ export default function StaffLoginPage() {
     } finally {
       setLoading(false);
     }
-  }
-
-  function fillDemoAccount(demoUser: string, demoPass: string) {
-    setUsername(demoUser);
-    setPassword(demoPass);
-    handleLogin(demoUser, demoPass);
   }
 
   if (!mounted) {
@@ -83,7 +89,7 @@ export default function StaffLoginPage() {
 
   return (
     <div className="min-h-screen bg-[#F6F9FB] flex flex-col justify-between p-4 sm:p-6 text-right" suppressHydrationWarning>
-      
+
       {/* Top Bar with Return Link */}
       <div className="w-full max-w-[1100px] mx-auto flex items-center justify-between">
         <Link
@@ -104,7 +110,7 @@ export default function StaffLoginPage() {
       {/* Main Login Card */}
       <div className="w-full max-w-lg mx-auto my-auto">
         <div className="bg-white rounded-[26px] border border-[#E2E8EE] p-7 sm:p-9 shadow-sm">
-          
+
           <div className="text-center mb-7 space-y-2">
             <Link href="/" className="inline-block transition-transform hover:scale-105">
               <Image
@@ -146,9 +152,10 @@ export default function StaffLoginPage() {
                 id="usernameInput"
                 type="text"
                 required
+                autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="اسم المستخدم (reception, doctor.echo, admin)"
+                placeholder="اسم المستخدم المعتمد من إدارة المستشفى"
                 className="w-full px-4 py-3 rounded-xl border border-[#E2E8EE] focus:border-[#087F78] focus:ring-1 focus:ring-[#087F78]/20 bg-[#F6F9FB]/40 text-sm text-[#163C3A] text-right placeholder:text-[#8493A6] transition-all"
               />
             </div>
@@ -161,6 +168,7 @@ export default function StaffLoginPage() {
                 id="passwordInput"
                 type="password"
                 required
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="كلمة المرور"
@@ -177,50 +185,15 @@ export default function StaffLoginPage() {
             </button>
           </form>
 
-          {/* Quick Demo Credentials Panel for testing / grading */}
-          <div className="mt-8 pt-6 border-t border-slate-100 space-y-3">
-            <span className="text-2xs font-bold text-[#8493A6] block text-center uppercase tracking-wider">
-              حسابات تجريبية للاختبار السريع (اضغط للدخول المباشر):
-            </span>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-2xs">
-              <button
-                type="button"
-                onClick={() => fillDemoAccount('reception', 'bsch2026')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 hover:border-[#087F78] border border-slate-200 text-right transition-all group"
-              >
-                <span className="font-bold text-[#124E4A] group-hover:text-[#087F78] flex items-center gap-1">
-                  <UserCheck className="w-3.5 h-3.5 text-[#087F78]" />
-                  <span>الاستقبال</span>
-                </span>
-                <span className="text-[#8493A6] block mt-1 font-mono text-3xs">reception</span>
-                <span className="text-3xs text-emerald-700 font-semibold block mt-0.5">صلاحيات الحجز والتأكيد والنداء</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => fillDemoAccount('doctor.echo', 'bsch2026')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 hover:border-[#087F78] border border-slate-200 text-right transition-all group"
-              >
-                <span className="font-bold text-[#124E4A] group-hover:text-[#087F78] flex items-center gap-1">
-                  <Stethoscope className="w-3.5 h-3.5 text-[#087F78]" />
-                  <span>طبيب العيادة</span>
-                </span>
-                <span className="text-[#8493A6] block mt-1 font-mono text-3xs">doctor.echo</span>
-                <span className="text-3xs text-blue-700 font-semibold block mt-0.5">طابور الإيكو، الكشف، والتحويل</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => fillDemoAccount('admin', 'admin2026')}
-                className="p-2.5 rounded-xl bg-slate-50 hover:bg-purple-50 hover:border-purple-600 border border-slate-200 text-right transition-all group"
-              >
-                <span className="font-bold text-[#124E4A] group-hover:text-purple-700 flex items-center gap-1">
-                  <ShieldAlert className="w-3.5 h-3.5 text-purple-600" />
-                  <span>مدير النظام</span>
-                </span>
-                <span className="text-[#8493A6] block mt-1 font-mono text-3xs">admin</span>
-                <span className="text-3xs text-purple-700 font-semibold block mt-0.5">إدارة العيادات والسجلات والكل</span>
-              </button>
+          {/* Security Notice */}
+          <div className="mt-8 pt-6 border-t border-slate-100">
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-right">
+              <KeyRound className="w-4 h-4 text-[#087F78] shrink-0 mt-0.5" />
+              <p className="text-2xs text-[#8493A6] leading-relaxed">
+                الدخول متاح فقط لحسابات الموظفين المعتمدة من إدارة المستشفى.
+                بعد أول تسجيل دخول يُنصح فوراً بتغيير كلمة المرور الابتدائية من داخل لوحة التحكم
+                (زر «تغيير كلمة المرور»).
+              </p>
             </div>
           </div>
 
@@ -235,5 +208,19 @@ export default function StaffLoginPage() {
         </Link>
       </div>
     </div>
+  );
+}
+
+export default function StaffLoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-[#F6F9FB] flex items-center justify-center p-4">
+          <div className="w-8 h-8 border-3 border-[#087F78] border-t-transparent rounded-full animate-spin" />
+        </div>
+      }
+    >
+      <StaffLoginForm />
+    </Suspense>
   );
 }

@@ -1,5 +1,4 @@
 import type { StaffUser } from '../types/index.ts';
-import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import {
   createAdminClient,
@@ -8,42 +7,31 @@ import {
   isSupabaseAdminConfigured,
   isMockStoreAllowed,
 } from '../lib/supabase/admin.ts';
+import {
+  getStaffSessionSecret,
+  issueStaffToken,
+  verifyStaffToken,
+  STAFF_SESSION_TTL_MS,
+} from '../lib/auth/token.ts';
 
 export interface AuthSession {
   user: StaffUser;
   token: string;
   expiresAt: number;
+  supabaseEmail?: string;
 }
 
-// Offline test fixtures strictly utilized in local development / unit testing when Supabase is unconfigured
-const TEST_STAFF_FIXTURES: (StaffUser & { passwordHash: string })[] = [
-  {
-    id: 'user-rec-1',
-    username: 'reception',
-    name: 'أ/ منى عبد الرحيم (موظف الحجز والاستقبال)',
-    role: 'RECEPTIONIST',
-    clinicId: 'general',
-    passwordHash: 'bsch2026',
-    active: true,
-  },
-  {
-    id: 'user-doc-1',
-    username: 'doctor.echo',
-    name: 'د/ شريف عبد الغني (استشاري قلب وإيكو الأطفال)',
-    role: 'DOCTOR',
-    clinicId: 'echo',
-    passwordHash: 'bsch2026',
-    active: true,
-  },
-  {
-    id: 'user-admin-1',
-    username: 'admin',
-    name: 'إدارة نظم المعلومات والعيادات الخارجية',
-    role: 'ADMIN',
-    passwordHash: 'admin2026',
-    active: true,
-  },
-];
+// Offline dev / unit-test accounts. Empty by default; tests may seed their own
+// users via _setMockUsersForTesting. No production credentials ever live here.
+export interface MockStaffUser {
+  id: string;
+  username: string;
+  name: string;
+  role: StaffUser['role'];
+  clinicId?: string | null;
+  password: string;
+  active: boolean;
+}
 
 // In-memory sessions map strictly for offline unit tests / development
 const globalForAuth = globalThis as unknown as {
@@ -58,9 +46,37 @@ if (process.env.NODE_ENV !== 'production') {
   globalForAuth.revokedStaffTokens = revokedStaffTokens;
 }
 
+function buildStaffUser(profile: {
+  id: string;
+  username: string;
+  full_name: string;
+  role: string;
+  clinic_id?: string | null;
+  is_active: boolean;
+}): StaffUser {
+  return {
+    id: profile.id,
+    username: profile.username,
+    name: profile.full_name,
+    role: profile.role as StaffUser['role'],
+    clinicId:
+      profile.clinic_id ||
+      (profile.role === 'RECEPTIONIST' ? 'general' : undefined),
+    active: profile.is_active,
+  };
+}
+
 export class AuthService {
+  private static mockUsers: MockStaffUser[] = [];
+
+  /** Test/dev-only seeding for the offline mock path. */
+  public static _setMockUsersForTesting(users: MockStaffUser[]): void {
+    AuthService.mockUsers = users.map((u) => ({ ...u }));
+  }
+
   /**
-   * Validate staff credentials using Supabase Auth in production or mock fallback in dev tests.
+   * Validate staff credentials using Supabase Auth (signInWithPassword) only.
+   * On success issues an HMAC-signed staff session token (httpOnly cookie on the login route).
    */
   public static async validateCredentials(
     usernameInput: string,
@@ -70,8 +86,11 @@ export class AuthService {
     const cleanUser = usernameInput.trim();
     const cleanPass = passwordInput.trim();
 
-    // 1. Supabase Auth Path
+    // 1. Supabase Auth Path (the ONLY production path)
     if (isSupabaseConfigured()) {
+      // Fail closed: staff sessions cannot be issued without the signing secret.
+      const secret = getStaffSessionSecret();
+
       try {
         let authClient: any = null;
         if (isSupabaseAdminConfigured()) {
@@ -131,47 +150,27 @@ export class AuthService {
           }
 
           if (profile && profile.is_active === true) {
-            const safeUser: StaffUser = {
-              id: profile.id,
-              username: profile.username,
-              name: profile.full_name,
-              role: profile.role,
-              clinicId: profile.clinic_id || (profile.role === 'RECEPTIONIST' ? 'general' : undefined),
-              active: profile.is_active,
-            };
+            const safeUser = buildStaffUser(profile);
+
+            const token = await issueStaffToken(
+              {
+                sub: safeUser.id,
+                username: safeUser.username,
+                name: safeUser.name,
+                role: safeUser.role,
+                clinicId: safeUser.clinicId || null,
+                exp: Date.now() + STAFF_SESSION_TTL_MS,
+              },
+              secret
+            );
 
             return {
               user: safeUser,
-              token: data.session.access_token,
-              expiresAt: Date.now() + (data.session.expires_in || 28800) * 1000,
+              token,
+              expiresAt: Date.now() + STAFF_SESSION_TTL_MS,
+              supabaseEmail: email,
             };
           }
-        }
-
-        // Fallback for authorized built-in staff members when not provisioned in Supabase Auth
-        const fixtureUser = TEST_STAFF_FIXTURES.find(
-          (u) => u.username.toLowerCase() === cleanUser.toLowerCase() && u.active
-        );
-        if (fixtureUser && fixtureUser.passwordHash === cleanPass) {
-          const { passwordHash: _, ...safeUser } = fixtureUser;
-          const secret = process.env.STAFF_SESSION_SECRET || 'bsch_fallback_secret_key_2026';
-          const payload = {
-            id: safeUser.id,
-            username: safeUser.username,
-            role: safeUser.role,
-            clinicId: safeUser.clinicId || null,
-            exp: Date.now() + 1000 * 60 * 60 * 8, // 8 hours
-          };
-          const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-          const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('hex');
-          const token = `bsch_staff_${payloadB64}.${sig}`;
-          const session: AuthSession = {
-            user: safeUser,
-            token,
-            expiresAt: payload.exp,
-          };
-          memoryActiveSessions.set(token, session);
-          return session;
         }
 
         return null;
@@ -186,27 +185,35 @@ export class AuthService {
       throw new Error('تسجيل الدخول غير متاح: قاعدة بيانات المصادقة غير مهيأة في بيئة الإنتاج.');
     }
 
-    // 3. Offline Dev / Unit Test Fallback
-    const user = TEST_STAFF_FIXTURES.find(
+    // 3. Offline Dev / Unit Test Fallback (seeded per-test, no built-in credentials)
+    const user = AuthService.mockUsers.find(
       (u) => u.username.toLowerCase() === cleanUser.toLowerCase() && u.active
     );
     if (!user) return null;
-    if (user.passwordHash !== cleanPass) return null;
+    if (user.password !== cleanPass) return null;
 
-    const { passwordHash: _, ...safeUser } = user;
+    const safeUser: StaffUser = {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      clinicId: user.clinicId || undefined,
+      active: user.active,
+    };
     const token = `bsch_token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
     const session: AuthSession = {
       user: safeUser,
       token,
-      expiresAt: Date.now() + 1000 * 60 * 60 * 8, // 8 hours
+      expiresAt: Date.now() + STAFF_SESSION_TTL_MS,
     };
     memoryActiveSessions.set(token, session);
     return session;
   }
 
   /**
-   * Verify an authentication token against Supabase Auth and staff_profiles.
-   * Never trusts client-supplied roles.
+   * Verify an authentication token.
+   * Never trusts client-supplied roles: HMAC tokens are re-checked against
+   * staff_profiles whenever the admin client is available.
    */
   public static async verifySession(token: string | null | undefined): Promise<StaffUser | null> {
     if (!token) return null;
@@ -216,26 +223,43 @@ export class AuthService {
     if (cleanToken.startsWith('bsch_staff_')) {
       if (revokedStaffTokens.has(cleanToken)) return null;
       try {
-        const parts = cleanToken.slice('bsch_staff_'.length).split('.');
-        if (parts.length === 2) {
-          const [payloadB64, sig] = parts;
-          const secret = process.env.STAFF_SESSION_SECRET || 'bsch_fallback_secret_key_2026';
-          const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('hex');
-          if (sig.length === expectedSig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
-            const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
-            if (payload.exp > Date.now()) {
-              const fixture = TEST_STAFF_FIXTURES.find((u) => u.id === payload.id && u.active);
-              if (fixture) {
-                const { passwordHash: _, ...safeUser } = fixture;
-                return safeUser;
-              }
+        const secret = getStaffSessionSecret();
+        const claims = await verifyStaffToken(cleanToken, secret);
+        if (!claims || claims.exp <= Date.now()) return null;
+
+        // Live re-validation against staff_profiles (role/active changes take effect immediately)
+        if (isSupabaseAdminConfigured()) {
+          try {
+            const adminClient = createAdminClient();
+            const { data: profile, error: profileErr } = await (adminClient as any)
+              .from('staff_profiles')
+              .select('id, username, full_name, role, clinic_id, is_active')
+              .eq('id', claims.sub)
+              .maybeSingle();
+
+            if (!profileErr && profile && profile.is_active === true) {
+              return buildStaffUser(profile);
             }
+            if (!profileErr && (!profile || profile.is_active !== true)) {
+              return null; // Fail closed: missing or inactive staff profile
+            }
+          } catch {
+            // DB unreachable: fall back to the signed claims (issued from a verified profile)
           }
         }
+
+        return {
+          id: claims.sub,
+          username: claims.username,
+          name: claims.name,
+          role: claims.role as StaffUser['role'],
+          clinicId: claims.clinicId || undefined,
+          active: true,
+        };
       } catch (err) {
         console.error('Error verifying bsch_staff token:', err);
+        return null;
       }
-      return null;
     }
 
     // 1. Supabase Auth Verification
@@ -299,14 +323,7 @@ export class AuthService {
           return null; // Fail closed: reject inactive or missing staff profile
         }
 
-        return {
-          id: profile.id,
-          username: profile.username,
-          name: profile.full_name,
-          role: profile.role,
-          clinicId: profile.clinic_id || undefined,
-          active: profile.is_active,
-        };
+        return buildStaffUser(profile);
       } catch (err) {
         console.error('Supabase verifySession exception:', err);
         return null;
@@ -360,5 +377,6 @@ export class AuthService {
   public static _resetMockSessionsForTesting(): void {
     memoryActiveSessions.clear();
     revokedStaffTokens.clear();
+    AuthService.mockUsers = [];
   }
 }

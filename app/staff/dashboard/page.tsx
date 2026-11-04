@@ -34,10 +34,14 @@ import {
   CalendarDays,
   XCircle,
   Phone,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import CmsDashboard from '@/components/cms/CmsDashboard';
 import { Appointment, Clinic, ClinicService, ClinicScheduleException, AppointmentStatus, AuditLogItem, CancellationRequest } from '@/types';
 import { getStatusDisplay, formatArabicDate, formatLocalDate } from '@/lib/rules';
+import { createClient } from '@/lib/supabase/client';
 
 export default function StaffDashboardPage() {
   const router = useRouter();
@@ -887,6 +891,106 @@ export default function StaffDashboardPage() {
     router.push('/staff/login');
   }
 
+  // Change Password State
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+
+  function resetChangePasswordForm() {
+    setNewPassword('');
+    setConfirmPassword('');
+    setShowNewPassword(false);
+    setShowConfirmPassword(false);
+    setPasswordError(null);
+    setPasswordSuccess(null);
+  }
+
+  function closeChangePassword() {
+    setShowChangePassword(false);
+    resetChangePasswordForm();
+  }
+
+  async function handleChangePassword() {
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
+    if (newPassword.length < 8) {
+      setPasswordError('كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف');
+      return;
+    }
+    if (newPassword.length > 72) {
+      setPasswordError('كلمة المرور الجديدة طويلة جداً (الحد الأقصى 72 حرفاً)');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('كلمتا المرور غير متطابقتين، يرجى إعادة الإدخال');
+      return;
+    }
+    if (currentUser?.username && newPassword.toLowerCase().includes(currentUser.username.toLowerCase())) {
+      setPasswordError('يُفضل ألا تحتوي كلمة المرور على اسم المستخدم');
+      return;
+    }
+
+    setChangingPassword(true);
+
+    try {
+      // 1. Primary path: supabase.auth.updateUser with the browser Supabase session
+      //    (established at login via signInWithPassword).
+      let clientUpdateFailed = false;
+      try {
+        const supabase = createClient();
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session) {
+          const { error } = await supabase.auth.updateUser({ password: newPassword });
+          if (error) {
+            clientUpdateFailed = true;
+          }
+        } else {
+          clientUpdateFailed = true;
+        }
+      } catch {
+        clientUpdateFailed = true;
+      }
+
+      // 2. Fallback path: server-side change via verified staff session.
+      if (clientUpdateFailed) {
+        const token = localStorage.getItem('bsch_staff_token');
+        const res = await fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token || ''}`,
+          },
+          body: JSON.stringify({ newPassword }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setPasswordError(data.error || 'تعذر تغيير كلمة المرور، يرجى المحاولة لاحقاً');
+          setChangingPassword(false);
+          return;
+        }
+      }
+
+      setPasswordSuccess(
+        'تم تغيير كلمة المرور بنجاح. استخدم كلمة المرور الجديدة في تسجيل الدخول القادم، ويرجى تسجيل الخروج من الأجهزة الأخرى وإعادة الدخول بها.'
+      );
+      setNewPassword('');
+      setConfirmPassword('');
+      setShowNewPassword(false);
+      setShowConfirmPassword(false);
+    } catch (err) {
+      console.error('Change password error:', err);
+      setPasswordError('تعذر تغيير كلمة المرور، يرجى المحاولة لاحقاً');
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
   // Metrics
   const totalCount = appointments.length;
   const pendingCount = appointments.filter((a) => a.status === 'PENDING_REVIEW').length;
@@ -982,6 +1086,18 @@ export default function StaffDashboardPage() {
             )}
 
             <button
+              onClick={() => {
+                resetChangePasswordForm();
+                setShowChangePassword(true);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-xl text-2xs sm:text-xs font-semibold text-[#087F78] hover:bg-emerald-50 border border-[#79C7C1]/60 transition-colors shrink-0"
+              title="تغيير كلمة المرور"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">تغيير كلمة المرور</span>
+            </button>
+
+            <button
               onClick={handleLogout}
               className="inline-flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-xl text-2xs sm:text-xs font-semibold text-red-600 hover:bg-red-50 border border-red-200 transition-colors shrink-0"
             >
@@ -992,6 +1108,135 @@ export default function StaffDashboardPage() {
 
         </div>
       </header>
+
+      {/* Change Password Modal */}
+      {showChangePassword && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0B2E2B]/60 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="changePasswordTitle"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeChangePassword();
+          }}
+        >
+          <div className="w-full max-w-md bg-white rounded-3xl border border-[#E2E8EE] shadow-2xl p-6 sm:p-7 text-right">
+            <div className="flex items-center justify-between mb-1">
+              <h2 id="changePasswordTitle" className="text-lg sm:text-xl font-extrabold text-[#124E4A] flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-[#087F78]" />
+                تغيير كلمة المرور
+              </h2>
+              <button
+                type="button"
+                onClick={closeChangePassword}
+                disabled={changingPassword}
+                className="p-2 rounded-xl text-[#8493A6] hover:bg-slate-100 hover:text-[#163C3A] transition-colors disabled:opacity-50"
+                aria-label="إغلاق"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
+            </div>
+            <p className="text-2xs sm:text-xs text-[#8493A6] mb-5">
+              يُنصح بتغيير كلمة المرور الابتدائية فور أول تسجيل دخول لحماية حسابك.
+            </p>
+
+            {passwordError && (
+              <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                <span>{passwordError}</span>
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="mb-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <span>{passwordSuccess}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleChangePassword();
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label htmlFor="newPasswordInput" className="block text-xs font-bold text-[#163C3A] mb-1.5">
+                  كلمة المرور الجديدة
+                </label>
+                <div className="relative">
+                  <input
+                    id="newPasswordInput"
+                    type={showNewPassword ? 'text' : 'password'}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="8 أحرف على الأقل"
+                    autoComplete="new-password"
+                    required
+                    minLength={8}
+                    maxLength={72}
+                    className="w-full px-4 py-3 rounded-xl border border-[#E2E8EE] focus:border-[#087F78] focus:ring-1 focus:ring-[#087F78]/20 bg-[#F6F9FB]/40 text-sm text-[#163C3A] placeholder:text-[#8493A6] transition-all pl-11"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8493A6] hover:text-[#087F78] transition-colors"
+                    aria-label={showNewPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                  >
+                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="confirmPasswordInput" className="block text-xs font-bold text-[#163C3A] mb-1.5">
+                  تأكيد كلمة المرور الجديدة
+                </label>
+                <div className="relative">
+                  <input
+                    id="confirmPasswordInput"
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="أعد إدخال كلمة المرور الجديدة"
+                    autoComplete="new-password"
+                    required
+                    minLength={8}
+                    maxLength={72}
+                    className="w-full px-4 py-3 rounded-xl border border-[#E2E8EE] focus:border-[#087F78] focus:ring-1 focus:ring-[#087F78]/20 bg-[#F6F9FB]/40 text-sm text-[#163C3A] placeholder:text-[#8493A6] transition-all pl-11"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword((v) => !v)}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8493A6] hover:text-[#087F78] transition-colors"
+                    aria-label={showConfirmPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  type="submit"
+                  disabled={changingPassword}
+                  className="flex-1 py-3 rounded-xl bg-[#087F78] hover:bg-[#124E4A] text-white text-sm font-bold shadow-xs hover:shadow-md transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {changingPassword ? 'جاري التحديث...' : 'حفظ كلمة المرور الجديدة'}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeChangePassword}
+                  disabled={changingPassword}
+                  className="px-5 py-3 rounded-xl border border-[#E2E8EE] text-sm font-bold text-[#8493A6] hover:bg-slate-50 transition-colors disabled:opacity-50"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Main Workspace */}
       <main className="flex-1 max-w-[1250px] w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">

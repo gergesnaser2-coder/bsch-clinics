@@ -142,10 +142,22 @@ export async function getSystemSupabaseClient(): Promise<{ client: any; userId: 
   }
 
   try {
+    const staffDefaultPassword = process.env.STAFF_DEFAULT_PASSWORD?.trim();
+    if (!staffDefaultPassword) {
+      console.warn(
+        'System Supabase sign-in fallback skipped: STAFF_DEFAULT_PASSWORD environment variable is not configured.'
+      );
+      return {
+        client: createClient<Database>(supabaseUrl, supabaseAnonKey),
+        userId: null,
+        authenticated: false,
+      };
+    }
+
     const baseClient = createClient<Database>(supabaseUrl, supabaseAnonKey);
     const { data, error } = await baseClient.auth.signInWithPassword({
       email: 'admin@hospital.internal',
-      password: process.env.STAFF_DEFAULT_PASSWORD || 'admin2026',
+      password: staffDefaultPassword,
     });
 
     if (!error && data?.session?.access_token) {
